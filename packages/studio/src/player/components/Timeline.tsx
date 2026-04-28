@@ -928,7 +928,10 @@ export const Timeline = memo(function Timeline({
   const { major, minor } = useMemo(() => generateTicks(effectiveDuration), [effectiveDuration]);
   const getPreviewElement = useCallback(
     (element: TimelineElement): TimelineElement => {
-      if (resizingClip?.element.id === element.id) {
+      if (
+        resizingClip &&
+        (resizingClip.element.key ?? resizingClip.element.id) === (element.key ?? element.id)
+      ) {
         return {
           ...element,
           start: resizingClip.previewStart,
@@ -1105,7 +1108,7 @@ export const Timeline = memo(function Timeline({
     draggedClip?.started === true && draggedElement
       ? getRenderedTimelineElement({
           element: draggedElement,
-          draggedElementId: draggedElement.id,
+          draggedElementId: draggedElement.key ?? draggedElement.id,
           previewStart: draggedClip.previewStart,
           previewTrack: draggedClip.previewTrack,
         })
