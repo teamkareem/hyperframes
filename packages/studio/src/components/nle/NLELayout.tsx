@@ -70,6 +70,7 @@ interface NLELayoutProps {
   ) => Promise<void> | void;
   onBlockedEditAttempt?: (element: TimelineElement, intent: BlockedTimelineEditIntent) => void;
   onSelectTimelineElement?: (element: TimelineElement | null) => void;
+  onProjectFilesChanged?: (files: Record<string, string>) => void;
   /** Exposes the compIdToSrc map for parent components (e.g., useRenderClipContent) */
   onCompIdToSrcChange?: (map: Map<string, string>) => void;
   /** Whether the timeline panel is visible (default: true) */
@@ -117,6 +118,7 @@ export const NLELayout = memo(function NLELayout({
   onResizeElement,
   onBlockedEditAttempt,
   onSelectTimelineElement,
+  onProjectFilesChanged,
   onCompIdToSrcChange,
   timelineVisible,
   onToggleTimeline,
@@ -223,6 +225,7 @@ export const NLELayout = memo(function NLELayout({
     fetch(`/api/projects/${projectId}/files/index.html`)
       .then((r) => r.json())
       .then((data: { content?: string }) => {
+        if (cancelled) return;
         const html = data.content || "";
         const map = new Map<string, string>();
         const re =
@@ -237,7 +240,10 @@ export const NLELayout = memo(function NLELayout({
         onCompIdToSrcChange?.(map);
       })
       .catch(() => {});
-  });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, refreshKey, onCompIdToSrcChange]);
 
   // Patch elements with compositionSrc whenever elements or compIdToSrc change.
   // eslint-disable-next-line no-restricted-syntax
@@ -447,6 +453,7 @@ export const NLELayout = memo(function NLELayout({
                 onResizeElement={onResizeElement}
                 onBlockedEditAttempt={onBlockedEditAttempt}
                 onSelectElement={onSelectTimelineElement}
+                onProjectFilesChanged={onProjectFilesChanged}
               />
             </div>
             {timelineFooter && <div className="flex-shrink-0">{timelineFooter}</div>}

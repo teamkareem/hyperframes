@@ -20,6 +20,7 @@ import {
   shouldShowTimelineShortcutHint,
   resolveTimelineAssetDrop,
 } from "./timelineLayout";
+import { useStudioSelectionStore } from "../store/selectionStore";
 
 // Re-export pure utilities so existing imports from "./Timeline" still resolve.
 export {
@@ -67,6 +68,7 @@ interface TimelineProps {
   ) => Promise<void> | void;
   onBlockedEditAttempt?: (element: TimelineElement, intent: BlockedTimelineEditIntent) => void;
   onSelectElement?: (element: TimelineElement | null) => void;
+  onProjectFilesChanged?: (files: Record<string, string>) => void;
   theme?: Partial<TimelineTheme>;
 }
 
@@ -83,6 +85,7 @@ export const Timeline = memo(function Timeline({
   onResizeElement,
   onBlockedEditAttempt,
   onSelectElement,
+  onProjectFilesChanged,
   theme: themeOverrides,
 }: TimelineProps = {}) {
   const theme = useMemo(() => ({ ...defaultTimelineTheme, ...themeOverrides }), [themeOverrides]);
@@ -117,6 +120,8 @@ export const Timeline = memo(function Timeline({
       window.removeEventListener("blur", blur);
     };
   });
+  });
+
 
   const [showPopover, setShowPopover] = useState(false);
   const [showShortcutHint, setShowShortcutHint] = useState(true);
@@ -307,6 +312,7 @@ export const Timeline = memo(function Timeline({
       setRangeSelection(null);
     }
   });
+
 
   const { major, minor } = useMemo(
     () => generateTicks(effectiveDuration, pps),
@@ -508,6 +514,7 @@ export const Timeline = memo(function Timeline({
             setShowPopover(false);
             setRangeSelection(null);
           }}
+          onProjectFilesChanged={onProjectFilesChanged}
         />
       )}
     </div>

@@ -551,3 +551,35 @@ export function applyPatchByTarget(html: string, target: PatchTarget, op: PatchO
       return html;
   }
 }
+
+export interface BatchedPatchOperation {
+  filePath: string;
+  target: PatchTarget;
+  operation: PatchOperation;
+}
+
+export interface BatchedPatchResult {
+  ok: boolean;
+  files: Record<string, string>;
+  errors: string[];
+}
+
+export function applyBatchedPatches(
+  files: Record<string, string>,
+  operations: BatchedPatchOperation[],
+): BatchedPatchResult {
+  const nextFiles = { ...files };
+  const errors: string[] = [];
+
+  for (const [index, item] of operations.entries()) {
+    const source = nextFiles[item.filePath];
+    if (source == null) {
+      errors.push(`Operation ${index}: file not found: ${item.filePath}`);
+      break;
+    }
+    nextFiles[item.filePath] = applyPatchByTarget(source, item.target, item.operation);
+  }
+
+  if (errors.length > 0) return { ok: false, files, errors };
+  return { ok: true, files: nextFiles, errors: [] };
+}

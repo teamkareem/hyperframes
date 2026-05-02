@@ -8,6 +8,9 @@ import {
   inferClipPathPreset,
   normalizePanelPxValue,
   setCssFilterFunctionPx,
+  getDesignerControlGroups,
+  isTextEditableElement,
+  TYPOGRAPHY_STYLE_CONTROLS,
 } from "./PropertyPanel";
 
 describe("PropertyPanel style helpers", () => {
@@ -63,5 +66,35 @@ describe("PropertyPanel style helpers", () => {
     ]);
     expect(buildStrokeStyleUpdates("none", "4px")).toEqual([["border-style", "none"]]);
     expect(buildStrokeStyleUpdates("solid", "4px")).toEqual([["border-style", "solid"]]);
+  });
+});
+
+describe("PropertyPanel designer controls", () => {
+  it("exposes rich typography controls for promptable text editing", () => {
+    expect(TYPOGRAPHY_STYLE_CONTROLS.map((control) => control.property)).toEqual(
+      expect.arrayContaining([
+        "font-size",
+        "font-weight",
+        "font-family",
+        "line-height",
+        "letter-spacing",
+        "word-spacing",
+        "font-kerning",
+        "text-align",
+        "font-style",
+        "text-transform",
+      ]),
+    );
+  });
+
+  it("treats semantic headings and text nodes as text editable", () => {
+    expect(isTextEditableElement({ tagName: "h3", textContent: "Headline" })).toBe(true);
+    expect(isTextEditableElement({ tagName: "button", textContent: "CTA" })).toBe(true);
+    expect(isTextEditableElement({ tagName: "img", textContent: null })).toBe(false);
+  });
+
+  it("groups layout, typography, appearance, and timing controls", () => {
+    const groups = getDesignerControlGroups({ hasTiming: true, isText: true });
+    expect(groups).toEqual(["Position & Size", "Typography", "Colors", "Appearance", "Timing"]);
   });
 });
