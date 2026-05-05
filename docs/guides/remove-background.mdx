@@ -1,0 +1,277 @@
+---
+title: Remove Background (transparent video)
+description: "Remove the background from a video or image and drop it into any composition as a transparent overlay."
+---
+
+Background removal — also called *matting* in VFX — separates a foreground subject (typically a person) from its background. The output is a video with an alpha channel: fully transparent where the background was, opaque where the subject is. Drop it into any HyperFrames composition as a `<video>` tag and the subject floats over whatever you put behind them.
+
+The CLI ships a built-in `remove-background` command that runs locally — no API keys, no cloud upload, no green screen.
+
+## Quick Start
+
+<Steps>
+  <Step title="Verify ffmpeg is installed">
+    The pipeline needs `ffmpeg` and `ffprobe` for decode + encode. Most systems already have them; if not:
+
+    ```bash Terminal
+    # macOS
+    brew install ffmpeg
+
+    # Ubuntu / Debian
+    sudo apt install ffmpeg
+    ```
+
+    Confirm with `npx hyperframes doctor` — both should be green.
+  </Step>
+  <Step title="Remove the background from your video">
+    ```bash Terminal
+    npx hyperframes remove-background avatar.mp4 -o transparent.webm
+    ```
+
+    On the first run, the CLI downloads ~168 MB of model weights to `~/.cache/hyperframes/background-removal/models/`. Subsequent runs reuse the cache.
+
+    Output:
+
+    ```
+    ◇  Removed background from 240 frames in 38.4s (6.3 fps, CoreML) → ./transparent.webm
+    ```
+  </Step>
+  <Step title="Drop it into a composition">
+    The output is a standard VP9-with-alpha WebM. Chrome's `<video>` element decodes the alpha plane natively — no special player needed:
+
+    ```html composition.html
+    <div class="scene">
+      <!-- background layer -->
+      <img src="city.jpg" class="bg" />
+
+      <!-- transparent avatar floats on top -->
+      <video src="transparent.webm" autoplay muted loop playsinline></video>
+    </div>
+    ```
+
+    Render the composition with the usual `hyperframes render`.
+  </Step>
+</Steps>
+
+## How it works
+
+The pipeline runs four stages, all locally:
+
+```
+ffmpeg decode  →  u²-net_human_seg inference  →  alpha composite  →  ffmpeg encode
+   (raw RGB)         (320×320 mask, then upsampled)                    (VP9-alpha)
+```
+
+The model is **u²-net_human_seg** (MIT license, ~168 MB ONNX). It runs through `onnxruntime-node` with the best-available execution provider on your machine: CoreML on Apple Silicon, CUDA on NVIDIA, CPU otherwise.
+
+The output is encoded with the exact ffmpeg flags Chrome's `<video>` element needs to decode alpha — `-pix_fmt yuva420p` plus the `alpha_mode=1` metadata tag. Get those wrong and the alpha plane is silently discarded by browsers.
+
+## Output formats
+
+| Extension | Codec | When to use | Size (4s @ 1080p) |
+|-----------|-------|-------------|-------------------|
+| `.webm` (default) | VP9 with alpha | Drop into `<video>` for HTML5-native transparent playback | ~1 MB |
+| `.mov` | ProRes 4444 with alpha | Editing round-trip in Premiere / Resolve / Final Cut | ~50 MB |
+| `.png` | PNG with alpha | Single-image cutout (only when the input is also a single image) | varies |
+
+```bash Terminal
+npx hyperframes remove-background avatar.mp4 -o transparent.webm        # web playback
+npx hyperframes remove-background avatar.mp4 -o transparent.mov         # editing
+npx hyperframes remove-background portrait.jpg -o cutout.png       # still image
+```
+
+## Performance
+
+Real-world numbers from the [matting eval](https://www.heygenverse.com/a/0dd5a431-1832-4858-862d-de7fb7d02654), running u²-net_human_seg on a 4-second 1080p clip:
+
+| Platform | Provider | ms/frame | 30-second clip |
+|----------|----------|----------|----------------|
+| Apple Silicon (M2 Pro / M3 / M4) | CoreML | ~263 | ~2 min |
+| NVIDIA GPU (T4, A10, RTX) | CUDA | ~80–150 | ~30–60 s |
+| Linux x86 | CPU | ~1100 | ~16 min |
+| macOS Intel | CPU | ~900 | ~13 min |
+
+Matting is offline preprocessing — you run it once per asset and reuse the output. CPU-only is slow but always works; if you reuse the same avatar repeatedly, run it once on a faster machine and check the transparent output into your project.
+
+## Picking a device explicitly
+
+`--device auto` is the default and right for almost everyone. The flag exists for two cases:
+
+- **Force CPU on a GPU box** when you want to keep the GPU free for other work, or are debugging an EP-specific issue:
+
+  ```bash Terminal
+  npx hyperframes remove-background avatar.mp4 -o transparent.webm --device cpu
+  ```
+
+- **Opt into CUDA** by setting `HYPERFRAMES_CUDA=1` and providing a GPU-enabled `onnxruntime-node` build (the bundled build is CPU + CoreML only, to keep the install small for the 99% of users who don't have a GPU):
+
+  ```bash Terminal
+  HYPERFRAMES_CUDA=1 npx hyperframes remove-background avatar.mp4 -o transparent.webm --device cuda
+  ```
+
+Run `npx hyperframes remove-background --info` to see what providers are detected on your machine and which one `auto` would pick.
+
+## Using the transparent video in a composition
+
+The transparent WebM behaves like any other video element. The two patterns you'll use most:
+
+**Avatar over a background image:**
+
+```html
+<div style="position: relative; width: 1920px; height: 1080px;">
+  <img src="background.jpg" style="position: absolute; inset: 0;" />
+  <video
+    src="transparent.webm"
+    autoplay
+    muted
+    loop
+    playsinline
+    style="position: absolute; right: 80px; bottom: 0; height: 90%;"
+  ></video>
+</div>
+```
+
+**Avatar over a HyperFrames scene:**
+
+```html
+<!-- scene contents (text, animations, etc.) -->
+<div class="title-card">Welcome</div>
+
+<!-- avatar layered on top -->
+<video src="transparent.webm" autoplay muted loop playsinline class="avatar"></video>
+```
+
+The avatar inherits the composition's frame rate and timeline — it plays through once during the scene's duration, so match the source clip length to the scene length when possible. If the scene is longer than the clip, `loop` handles it.
+
+<Tip>
+  When rendering a composition that contains a `<video>` element, the renderer reads the source via ffmpeg internally. Transparent WebMs are decoded with the alpha plane preserved.
+</Tip>
+
+## What u²-net_human_seg is and isn't good for
+
+The model is purpose-built for **portrait / human matting**. It excels when:
+
+- ✅ The subject is a person, head-and-shoulders or full-body
+- ✅ The framing is reasonably stable (not a wide handheld shot)
+- ✅ The background contrasts with the subject
+
+It struggles or fails on:
+
+- ❌ Non-human subjects (products, animals, objects). The model will return a mostly-empty mask.
+- ❌ Very fine hair detail on a busy background. The 320×320 inference resolution means hair tips get softened — fine for most use cases, but compositors notice.
+- ❌ Frame-to-frame temporal consistency. Each frame is processed independently, so static backgrounds with moving subjects can show subtle edge flicker. For most web playback this is invisible; for high-end VFX it may matter.
+- ❌ Live streams or real-time capture. The pipeline is batch-only.
+
+If your use case hits one of these, see the alternatives below.
+
+## Alternatives — when the built-in command isn't the right tool
+
+The CLI ships **one model on purpose** — the one that's MIT-licensed, runs everywhere, and produces production-quality output for HeyGen-style avatar workflows. The list below leads with **free, open-source tools** that pair naturally with HyperFrames. Each entry calls out the actual catch — license, install effort, hardware needs — so you can pick the right one for your situation. Full benchmarks are in the [matting eval](https://www.heygenverse.com/a/0dd5a431-1832-4858-862d-de7fb7d02654).
+
+### Free, open-source CLIs and libraries
+
+These all run locally with no account, no upload, no watermark.
+
+| Tool | When to use it | Catch |
+|------|----------------|-------|
+| [`rembg`](https://github.com/danielgatis/rembg) (Python, MIT) | You need a different subject type — `isnet-general-use` for objects/animals/products, `birefnet-portrait` for a quality ceiling on hair, `silueta` for a tiny ~40 MB footprint. Same family as our default model, more variety. | Requires Python + `pip install rembg`. Some bundled models (`birefnet-*`) need ~4 GB RAM and are CPU-only |
+| [BiRefNet](https://github.com/ZhengPeng7/BiRefNet) (PyTorch, MIT) | Highest-fidelity portrait mattes available — visibly better hair edges than u²-net | Heavy (~4 GB inference RAM), slow on CPU, broken on Apple CoreML at the time of the eval |
+| [Robust Video Matting (RVM)](https://github.com/PeterL1n/RobustVideoMatting) (PyTorch, **GPL-3.0**) | The only widely-available model with **temporal consistency** built in — no edge flicker on moving subjects. Best choice when you're matting a long talking-head clip and frame-to-frame stability matters | GPL-3.0 license is incompatible with most commercial / proprietary codebases. Read your repo's license before using |
+| [Backgroundremover](https://github.com/nadermx/backgroundremover) (Python, MIT) | Simple `pip install` wrapper around u²-net; nice if you want a Python API instead of our Node CLI | Same model family as ours, no quality difference — pick whichever fits your stack |
+| [ComfyUI](https://github.com/comfyanonymous/ComfyUI) (open-source, GPL-3.0 core) | Custom workflows: chain a segmentation model + alpha refinement + temporal smoothing. The right tool for tricky cases (multiple subjects, hair against a similar background, sports footage) | Setup is involved (Python, models, node graph). Worth it for repeat specialty work |
+
+After running any of these externally, encode the output as a HyperFrames-compatible transparent WebM with:
+
+```bash Terminal
+ffmpeg -i frames-%04d.png -c:v libvpx-vp9 \
+  -pix_fmt yuva420p \
+  -metadata:s:v:0 alpha_mode=1 \
+  -auto-alt-ref 0 -b:v 0 -crf 30 \
+  transparent.webm
+```
+
+### Free desktop / GUI tools
+
+| Tool | When to use it | Catch |
+|------|----------------|-------|
+| [DaVinci Resolve — Magic Mask](https://www.blackmagicdesign.com/products/davinciresolve) | You're already editing in Resolve, want a brush-based UI with manual refinement, and need to round-trip the alpha into a larger edit | macOS / Windows / Linux desktop install. The free tier covers Magic Mask; paid Studio version unlocks higher resolutions on some features |
+| [Backgroundremover.app](https://backgroundremover.app) (web) | One-off image cutout, no signup, no watermark | Single images only, not video. Free tier is hosted but the underlying tool is the same `rembg` model family |
+| [PhotoRoom Background Remover](https://www.photoroom.com/tools/background-remover) (web) | Quick one-off image, polished UI, no signup | Single images only, e-commerce-tuned model |
+
+### Web SaaS tools (free tiers, with strings)
+
+| Tool | When to use it | Catch |
+|------|----------------|-------|
+| [unscreen.com](https://www.unscreen.com) | Quick one-off video, no install, drag-and-drop | **Free tier is watermarked and capped at short clips** (~10s preview). Paid removes both. Run by the team behind remove.bg |
+| [RunwayML — Green Screen](https://runwayml.com) | Polished UI with brush refinement and time-aware tracking; the closest a SaaS gets to professional roto | Free tier exists but is credit-limited; serious use is a subscription |
+| [Kapwing — Background Remover](https://www.kapwing.com/tools/remove-video-background) | Browser-based, integrates with their video editor | Free tier is watermarked; paid removes it |
+
+### How to choose
+
+- **Avatars / portraits, web playback, MIT-clean** → use the built-in `hyperframes remove-background` (this is what it's tuned for).
+- **Non-human subject** (product, animal, object) → `rembg` with `isnet-general-use`.
+- **Maximum portrait quality, especially hair** → `BiRefNet` via Python.
+- **Long video where edge flicker would be visible**, GPL is OK → `RVM`.
+- **One-off marketing clip, no install** → DaVinci Resolve (free) for video, Backgroundremover.app for a still image.
+- **Specialty case the off-the-shelf models can't handle** → ComfyUI with a custom graph.
+
+## Troubleshooting
+
+### Model download fails or hangs
+
+The weights live on GitHub Releases (rembg's `v0.0.0` release, ~168 MB). If your network blocks GitHub or the download is interrupted:
+
+```bash Terminal
+# Manually download and drop into the cache
+mkdir -p ~/.cache/hyperframes/background-removal/models
+curl -L -o ~/.cache/hyperframes/background-removal/models/u2net_human_seg.onnx \
+  https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net_human_seg.onnx
+```
+
+Subsequent `remove-background` runs skip the download and use your local copy.
+
+### "ffmpeg and ffprobe are required"
+
+The pipeline shells out to ffmpeg for decode + encode. Install via `brew install ffmpeg` on macOS or `sudo apt install ffmpeg` on Debian/Ubuntu. Verify with `npx hyperframes doctor`.
+
+### The output WebM looks fully opaque in the browser
+
+Chrome only reads the alpha plane when the WebM is encoded as `yuva420p` with the `alpha_mode=1` metadata tag. The CLI sets both. If you re-encode the output yourself (e.g. with another ffmpeg invocation), preserve those flags:
+
+```bash Terminal
+ffmpeg -i in.webm -c:v libvpx-vp9 \
+  -pix_fmt yuva420p \
+  -metadata:s:v:0 alpha_mode=1 \
+  -auto-alt-ref 0 \
+  out.webm
+```
+
+To verify a WebM has alpha, extract the first frame and inspect:
+
+```bash Terminal
+ffmpeg -y -c:v libvpx-vp9 -i out.webm -frames:v 1 -pix_fmt rgba -update 1 frame0.png
+```
+
+The decoded `frame0.png` should be RGBA and have non-trivial alpha values.
+
+### CoreML is "available" but inference fails to start
+
+The pipeline auto-falls-back to CPU if CoreML fails to bind, with a warning. If you want to skip the CoreML attempt entirely, force CPU:
+
+```bash Terminal
+npx hyperframes remove-background avatar.mp4 -o transparent.webm --device cpu
+```
+
+### The alpha mask has rough or jagged edges
+
+That usually means the source frame is high-contrast against a similar-toned background and the model's 320×320 inference resolution is showing through. Two paths forward:
+
+1. Re-frame or re-shoot to give the subject a more contrasting background.
+2. Try `birefnet-portrait` via `rembg` (see [Other open-source models](#other-open-source-models)) — it's higher quality at hair edges but slower and heavier.
+
+## Reference
+
+- CLI: [`hyperframes remove-background`](/packages/cli#remove-background)
+- Eval: [Matting eval — v7](https://www.heygenverse.com/a/0dd5a431-1832-4858-862d-de7fb7d02654)
+- Source model: [danielgatis/rembg](https://github.com/danielgatis/rembg)
+- ONNX runtime: [`onnxruntime-node`](https://www.npmjs.com/package/onnxruntime-node)

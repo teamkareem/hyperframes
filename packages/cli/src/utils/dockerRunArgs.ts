@@ -29,6 +29,7 @@ export interface DockerRenderOptions {
   crf?: number;
   videoBitrate?: string;
   quiet: boolean;
+  variables?: Record<string, unknown>;
 }
 
 export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
@@ -63,5 +64,8 @@ export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
     ...(options.browserGpu ? [] : ["--no-browser-gpu"]),
     ...(options.hdrMode === "force-hdr" ? ["--hdr"] : []),
     ...(options.hdrMode === "force-sdr" ? ["--sdr"] : []),
+    ...(options.variables && Object.keys(options.variables).length > 0
+      ? ["--variables", JSON.stringify(options.variables)]
+      : []),
   ];
 }

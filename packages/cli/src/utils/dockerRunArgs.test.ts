@@ -187,4 +187,27 @@ describe("buildDockerRunArgs", () => {
     expect(args).toContain("10M");
     expect(args).not.toContain("--crf");
   });
+
+  it("forwards --variables JSON to the container when set", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, variables: { title: "Hello", n: 3 } },
+    });
+    const idx = args.indexOf("--variables");
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe('{"title":"Hello","n":3}');
+  });
+
+  it("omits --variables when none provided", () => {
+    const args = buildDockerRunArgs({ ...FIXED_INPUT, options: BASE });
+    expect(args).not.toContain("--variables");
+  });
+
+  it("omits --variables when payload is empty", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, variables: {} },
+    });
+    expect(args).not.toContain("--variables");
+  });
 });

@@ -155,6 +155,22 @@ export async function createCaptureSession(
       w.__name = <T>(fn: T, _name: string): T => fn;
     }
   });
+  // Inject render-time variable overrides before any page script runs, so the
+  // runtime helper `getVariables()` returns the merged result on its first
+  // call. Pass the JSON string and parse inside the page so we don't require
+  // any JSON-incompatible value to round-trip through Puppeteer's serializer.
+  if (options.variables && Object.keys(options.variables).length > 0) {
+    const variablesJson = JSON.stringify(options.variables);
+    await page.evaluateOnNewDocument((json: string) => {
+      type WindowWithVariables = Window & { __hfVariables?: Record<string, unknown> };
+      try {
+        (window as WindowWithVariables).__hfVariables = JSON.parse(json);
+      } catch {
+        // The CLI validated the JSON before this point — a parse failure here
+        // means the page swapped JSON.parse, which is the page's problem.
+      }
+    }, variablesJson);
+  }
   const browserVersion = await browser.version();
   const expectedMajor = config?.expectedChromiumMajor;
   if (Number.isFinite(expectedMajor)) {

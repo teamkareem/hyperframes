@@ -60,6 +60,7 @@ const GROUPS: Group[] = [
         "Transcribe audio/video to word-level timestamps, or import an existing transcript",
       ],
       ["tts", "Generate speech audio from text using a local AI model (Kokoro-82M)"],
+      ["remove-background", "Remove background from a video or image to produce transparent media"],
     ],
   },
   {
@@ -101,7 +102,7 @@ const STATIC_EXAMPLES: Record<string, Example[]> = {
 
 // ── Render root help ───────────────────────────────────────────────────────
 function renderRootHelp(): string {
-  const NAME_COL = 16;
+  const NAME_COL = 19;
   const CMD_COL = 46;
   const lines: string[] = [];
 

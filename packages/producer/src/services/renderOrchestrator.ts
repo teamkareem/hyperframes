@@ -268,6 +268,16 @@ export interface RenderConfig {
    * - `force-sdr`: skip probing entirely; always render SDR.
    */
   hdrMode?: "auto" | "force-hdr" | "force-sdr";
+  /**
+   * Render-time variable overrides for the composition. Injected as
+   * `window.__hfVariables` before any page script runs and consumed by the
+   * runtime helper `getVariables()`, which merges them over the declared
+   * defaults from `<html data-composition-variables="...">`.
+   *
+   * Populated by the CLI from `--variables '<json>'` /
+   * `--variables-file <path>`. Must be a JSON-serializable plain object.
+   */
+  variables?: Record<string, unknown>;
 }
 
 export interface RenderPerfSummary {
@@ -2512,6 +2522,7 @@ export async function executeRenderJob(
       fps: job.config.fps,
       format: needsAlpha ? "png" : "jpeg",
       quality: needsAlpha ? undefined : job.config.quality === "draft" ? 80 : 95,
+      variables: job.config.variables,
     };
 
     // Capture sessions do not need native browser metadata for videos whose

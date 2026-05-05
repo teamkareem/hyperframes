@@ -166,6 +166,9 @@ export { createGSAPFrameAdapter } from "./adapters/gsap";
 export { fitTextFontSize } from "./text/index.js";
 export type { FitTextOptions, FitTextResult } from "./text/index.js";
 
+// Runtime helpers (composition-side)
+export { getVariables } from "./runtime/getVariables.js";
+
 // Registry
 export type {
   ItemType,

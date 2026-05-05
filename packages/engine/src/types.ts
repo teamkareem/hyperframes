@@ -102,6 +102,17 @@ export interface CaptureOptions {
    * intrinsic media dimensions.
    */
   skipReadinessVideoIds?: readonly string[];
+  /**
+   * Render-time variable overrides for the composition. The engine injects
+   * these as `window.__hfVariables` via `evaluateOnNewDocument` before any
+   * page script runs, so the runtime helper `getVariables()` returns the
+   * merged result of declared defaults (`data-composition-variables`) and
+   * these overrides on its first call.
+   *
+   * The CLI populates this from `--variables '<json>'` /
+   * `--variables-file <path>`. Must be a JSON-serializable plain object.
+   */
+  variables?: Record<string, unknown>;
 }
 
 export interface CaptureVideoMetadataHint {

@@ -1,6 +1,6 @@
 ---
 name: hyperframes-cli
-description: HyperFrames CLI tool — hyperframes init, lint, inspect, preview, render, transcribe, tts, doctor, browser, info, upgrade, compositions, docs, benchmark. Use when scaffolding a project, linting, validating, inspecting visual layout in compositions, previewing in the studio, rendering to video, transcribing audio, generating TTS, or troubleshooting the HyperFrames environment.
+description: HyperFrames CLI tool — hyperframes init, lint, inspect, preview, render, transcribe, tts, remove-background, doctor, browser, info, upgrade, compositions, docs, benchmark. Use when scaffolding a project, linting, validating, inspecting visual layout in compositions, previewing in the studio, rendering to video, transcribing audio, generating TTS, removing the background from an avatar video for transparent overlays, or troubleshooting the HyperFrames environment.
 ---
 
 # HyperFrames CLI
@@ -132,6 +132,20 @@ npx hyperframes tts "Text here" --voice af_nova --output narration.wav
 npx hyperframes tts script.txt --voice bf_emma
 npx hyperframes tts --list  # show all voices
 ```
+
+## Background Removal (transparent video)
+
+Remove the background from a video or image so it can be used as a transparent overlay in a composition (e.g. an avatar floating on a background).
+
+```bash
+npx hyperframes remove-background avatar.mp4 -o transparent.webm  # default: VP9 alpha WebM
+npx hyperframes remove-background avatar.mp4 -o transparent.mov   # ProRes 4444 for editing
+npx hyperframes remove-background portrait.jpg -o cutout.png      # single-image cutout
+npx hyperframes remove-background avatar.mp4 -o transparent.webm --device cpu
+npx hyperframes remove-background --info                          # detected providers
+```
+
+Uses `u2net_human_seg` (MIT). First run downloads ~168 MB of weights to `~/.cache/hyperframes/background-removal/models/` and reuses them after. Drop the resulting `.webm` into a composition with `<video src="transparent.webm" autoplay muted loop>` — Chrome decodes the alpha natively.
 
 ## Troubleshooting
 

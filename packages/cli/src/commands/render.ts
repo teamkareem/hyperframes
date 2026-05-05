@@ -11,6 +11,14 @@ export const examples: Example[] = [
   ["Parallel rendering with 6 workers", "hyperframes render --workers 6 --output fast.mp4"],
   ["Opt out of browser GPU render", "hyperframes render --no-browser-gpu --output cpu.mp4"],
   ["HDR output (auto-detected)", "hyperframes render --output hdr-output.mp4"],
+  [
+    "Override composition variables (parametrized render)",
+    'hyperframes render --variables \'{"title":"Q4 Report","theme":"dark"}\' --output q4.mp4',
+  ],
+  [
+    "Variables from a JSON file",
+    "hyperframes render --variables-file ./vars.json --output out.mp4",
+  ],
 ];
 import { cpus, freemem, tmpdir } from "node:os";
 import { resolve, dirname, join, basename } from "node:path";
@@ -123,6 +131,16 @@ export default defineCommand({
     "max-concurrent-renders": {
       type: "string",
       description: "Max concurrent renders when using the producer server (1-10). Default: 2.",
+    },
+    variables: {
+      type: "string",
+      description:
+        'JSON object of variable values, merged over the composition\'s data-composition-variables defaults. Example: --variables \'{"title":"Hello"}\'. Read inside the composition via window.__hyperframes.getVariables().',
+    },
+    "variables-file": {
+      type: "string",
+      description:
+        "Path to a JSON file with variable values (alternative to --variables). The file must contain a single JSON object.",
     },
   },
   async run({ args }) {
@@ -328,6 +346,9 @@ export default defineCommand({
       process.exit(1);
     }
 
+    // ── Resolve --variables / --variables-file ──────────────────────────
+    const variables = resolveVariablesArg(args.variables, args["variables-file"]);
+
     // ── Render ────────────────────────────────────────────────────────────
     if (useDocker) {
       await renderDocker(project.dir, outputPath, {
@@ -341,6 +362,7 @@ export default defineCommand({
         crf,
         videoBitrate,
         quiet,
+        variables,
       });
     } else {
       await renderLocal(project.dir, outputPath, {
@@ -355,6 +377,7 @@ export default defineCommand({
         videoBitrate,
         quiet,
         browserPath,
+        variables,
       });
     }
   },
@@ -372,6 +395,118 @@ interface RenderOptions {
   videoBitrate?: string;
   quiet: boolean;
   browserPath?: string;
+  variables?: Record<string, unknown>;
+}
+
+export type VariablesParseError =
+  | { kind: "conflict" }
+  | { kind: "read-error"; path: string; cause: string }
+  | { kind: "parse-error"; source: "inline" | "file"; cause: string }
+  | { kind: "shape-error" };
+
+export type VariablesParseResult =
+  | { ok: true; value: Record<string, unknown> | undefined }
+  | { ok: false; error: VariablesParseError };
+
+/**
+ * Pure parser for `--variables` / `--variables-file` flag pair. Splits out
+ * from `resolveVariablesArg` so validation paths are unit-testable without
+ * triggering `process.exit`. Reports failures via a structured `kind`
+ * discriminant so the side-effecting wrapper owns all UI strings.
+ */
+export function parseVariablesArg(
+  inline: string | undefined,
+  filePath: string | undefined,
+  readFile: (path: string) => string = (p) => readFileSync(resolve(p), "utf8"),
+): VariablesParseResult {
+  if (inline != null && filePath != null) {
+    return { ok: false, error: { kind: "conflict" } };
+  }
+  let raw: string | undefined;
+  let source: "inline" | "file" | undefined;
+  if (inline != null) {
+    raw = inline;
+    source = "inline";
+  } else if (filePath != null) {
+    try {
+      raw = readFile(filePath);
+      source = "file";
+    } catch (error: unknown) {
+      return {
+        ok: false,
+        error: {
+          kind: "read-error",
+          path: filePath,
+          cause: error instanceof Error ? error.message : String(error),
+        },
+      };
+    }
+  }
+  if (raw == null) return { ok: true, value: undefined };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      error: {
+        kind: "parse-error",
+        source: source ?? "inline",
+        cause: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, error: { kind: "shape-error" } };
+  }
+  return { ok: true, value: parsed as Record<string, unknown> };
+}
+
+function variablesErrorMessage(error: VariablesParseError): { title: string; message: string } {
+  switch (error.kind) {
+    case "conflict":
+      return {
+        title: "Conflicting variables flags",
+        message: "Use either --variables or --variables-file, not both.",
+      };
+    case "read-error":
+      return {
+        title: "Could not read --variables-file",
+        message: `${error.path}: ${error.cause}`,
+      };
+    case "parse-error":
+      return {
+        title:
+          error.source === "file"
+            ? "Invalid JSON in --variables-file"
+            : "Invalid JSON in --variables",
+        message: error.cause,
+      };
+    case "shape-error":
+      return {
+        title: "Invalid variables payload",
+        message: 'Variables must be a JSON object (e.g. {"title":"Hello"}).',
+      };
+  }
+}
+
+/**
+ * Resolve `--variables` / `--variables-file` into a plain object, or
+ * `undefined` when neither flag is set. Exits the process with a friendly
+ * error box on any validation failure.
+ */
+export function resolveVariablesArg(
+  inline: string | undefined,
+  filePath: string | undefined,
+): Record<string, unknown> | undefined {
+  const result = parseVariablesArg(inline, filePath);
+  if (!result.ok) {
+    const { title, message } = variablesErrorMessage(result.error);
+    errorBox(title, message);
+    process.exit(1);
+  }
+  return result.value;
 }
 
 export function resolveBrowserGpuForCli(
@@ -507,6 +642,7 @@ async function renderDocker(
       crf: options.crf,
       videoBitrate: options.videoBitrate,
       quiet: options.quiet,
+      variables: options.variables,
     },
   });
 
@@ -575,6 +711,7 @@ export async function renderLocal(
     hdrMode: options.hdrMode,
     crf: options.crf,
     videoBitrate: options.videoBitrate,
+    variables: options.variables,
   });
 
   const onProgress = options.quiet
