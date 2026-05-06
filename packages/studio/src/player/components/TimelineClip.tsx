@@ -4,6 +4,8 @@ import { memo, type ReactNode } from "react";
 import type { TimelineElement } from "../store/playerStore";
 import { defaultTimelineTheme, getClipHandleOpacity, type TimelineTheme } from "./timelineTheme";
 import type { TimelineEditCapabilities } from "./timelineEditing";
+import { getTimelineEditCapabilities } from "./timelineEditing";
+import { getTimelineClipDomKey, getTimelineElementIdentity } from "../../utils/selectionAssociation";
 
 interface TimelineClipProps {
   el: TimelineElement;
@@ -64,10 +66,12 @@ export const TimelineClip = memo(function TimelineClip({
         : theme.clipShadow;
   const displayLabel = el.label || el.id || el.tag;
   const showHandles = handleOpacity > 0.01;
+  const clipDomKey = getTimelineClipDomKey(getTimelineElementIdentity(el));
 
   return (
     <div
       data-clip="true"
+      data-timeline-element-id={clipDomKey}
       className={
         hasCustomContent ? "absolute overflow-hidden" : "absolute flex items-center overflow-hidden"
       }
