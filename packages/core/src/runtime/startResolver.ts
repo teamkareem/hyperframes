@@ -1,4 +1,5 @@
 import type { RuntimeTimelineLike } from "./types";
+import { swallow } from "./diagnostics";
 
 const AUTHORED_DURATION_ATTR = "data-hf-authored-duration";
 const AUTHORED_END_ATTR = "data-hf-authored-end";
@@ -118,8 +119,9 @@ export function createRuntimeStartTimeResolver(params: {
             if (Number.isFinite(timelineDuration) && timelineDuration > 0) {
               resolved = timelineDuration;
             }
-          } catch {
+          } catch (err) {
             // ignore broken timeline impls
+            swallow("runtime.startResolver.site1", err);
           }
         }
       }

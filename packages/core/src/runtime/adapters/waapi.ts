@@ -1,4 +1,5 @@
 import type { RuntimeDeterministicAdapter } from "../types";
+import { swallow } from "../diagnostics";
 
 export function createWaapiAdapter(): RuntimeDeterministicAdapter {
   return {
@@ -10,13 +11,15 @@ export function createWaapiAdapter(): RuntimeDeterministicAdapter {
       for (const animation of document.getAnimations()) {
         try {
           animation.currentTime = timeMs;
-        } catch {
+        } catch (err) {
           // ignore animations that reject currentTime writes
+          swallow("runtime.adapters.waapi.site1", err);
         }
         try {
           animation.pause();
-        } catch {
+        } catch (err) {
           // infinite unresolved animations can throw here until currentTime resolves
+          swallow("runtime.adapters.waapi.site2", err);
         }
       }
     },
@@ -25,8 +28,9 @@ export function createWaapiAdapter(): RuntimeDeterministicAdapter {
       for (const animation of document.getAnimations()) {
         try {
           animation.pause();
-        } catch {
+        } catch (err) {
           // ignore animation edge-cases
+          swallow("runtime.adapters.waapi.site3", err);
         }
       }
     },

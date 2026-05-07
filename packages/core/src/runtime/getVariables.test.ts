@@ -2,7 +2,7 @@
  * @vitest-environment jsdom
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { getVariables } from "./getVariables";
+import { getVariables, readDeclaredDefaults } from "./getVariables";
 
 const VARIABLES_ATTR = "data-composition-variables";
 
@@ -102,5 +102,32 @@ describe("getVariables", () => {
     const vars = getVariables<Vars>();
     expect(vars.title).toBe("Hello");
     expect(vars.missing).toBeUndefined();
+  });
+});
+
+describe("readDeclaredDefaults", () => {
+  it("returns {} for a null root", () => {
+    expect(readDeclaredDefaults(null)).toEqual({});
+  });
+
+  it("extracts {id: default} from an arbitrary element with the attribute", () => {
+    const el = document.createElement("html");
+    el.setAttribute(
+      "data-composition-variables",
+      JSON.stringify([
+        { id: "title", type: "string", label: "Title", default: "Hello" },
+        { id: "count", type: "number", label: "Count", default: 3 },
+      ]),
+    );
+    expect(readDeclaredDefaults(el)).toEqual({ title: "Hello", count: 3 });
+  });
+
+  it("returns {} when the attribute is invalid JSON or non-array", () => {
+    const a = document.createElement("html");
+    a.setAttribute("data-composition-variables", "{not json");
+    expect(readDeclaredDefaults(a)).toEqual({});
+    const b = document.createElement("html");
+    b.setAttribute("data-composition-variables", JSON.stringify({ title: "x" }));
+    expect(readDeclaredDefaults(b)).toEqual({});
   });
 });

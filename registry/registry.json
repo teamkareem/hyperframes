@@ -100,7 +100,11 @@
       "type": "hyperframes:block"
     },
     {
-      "name": "goonvpn-youtube-spot",
+      "name": "vpn-youtube-spot",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "blue-sweater-intro-video",
       "type": "hyperframes:block"
     },
     {
@@ -217,6 +221,34 @@
     },
     {
       "name": "transitions-scale",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "vfx-text-cursor",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "vfx-liquid-background",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "vfx-iphone-device",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "vfx-magnetic",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "vfx-portal",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "vfx-liquid-glass",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "vfx-shatter",
       "type": "hyperframes:block"
     }
   ]

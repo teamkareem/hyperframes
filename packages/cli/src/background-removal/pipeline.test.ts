@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
 import type { spawn } from "node:child_process";
-import { inferOutputFormat, inferInputKind, buildEncoderArgs, waitForExit } from "./pipeline.js";
+import {
+  inferOutputFormat,
+  inferInputKind,
+  buildEncoderArgs,
+  resolveRenderTargets,
+  waitForExit,
+} from "./pipeline.js";
 
 describe("background-removal/pipeline — inferOutputFormat", () => {
   it("maps .webm → webm", () => {
@@ -46,6 +52,35 @@ describe("background-removal/pipeline — buildEncoderArgs", () => {
     expect(args[args.length - 1]).toBe("/tmp/out.webm");
   });
 
+  it("webm preset tags BT.709 colorspace + limited range", () => {
+    // Without these tags, ffmpeg's RGB→YUV conversion uses the BT.601 default,
+    // and Chrome's YUV→RGB pass on the resulting webm produces a different
+    // RGB triple than the source mp4 (visible color shift on overlay). Pin
+    // BT.709 limited-range so the cutout matches modern Rec.709 sources.
+    const args = buildEncoderArgs("webm", 1920, 1080, 30, "/tmp/out.webm");
+    const csIdx = args.indexOf("-colorspace");
+    expect(csIdx).toBeGreaterThan(-1);
+    expect(args[csIdx + 1]).toBe("bt709");
+    const rangeIdx = args.indexOf("-color_range");
+    expect(rangeIdx).toBeGreaterThan(-1);
+    expect(args[rangeIdx + 1]).toBe("tv");
+  });
+
+  it("webm quality presets map to crf 30/18/12", () => {
+    const fast = buildEncoderArgs("webm", 1920, 1080, 30, "/tmp/o.webm", "fast");
+    const balanced = buildEncoderArgs("webm", 1920, 1080, 30, "/tmp/o.webm", "balanced");
+    const best = buildEncoderArgs("webm", 1920, 1080, 30, "/tmp/o.webm", "best");
+    const crf = (args: string[]) => args[args.indexOf("-crf") + 1];
+    expect(crf(fast)).toBe("30");
+    expect(crf(balanced)).toBe("18");
+    expect(crf(best)).toBe("12");
+  });
+
+  it("webm default quality is balanced (crf 18)", () => {
+    const args = buildEncoderArgs("webm", 1920, 1080, 30, "/tmp/o.webm");
+    expect(args[args.indexOf("-crf") + 1]).toBe("18");
+  });
+
   it("mov preset emits ProRes 4444 + yuva444p10le", () => {
     const args = buildEncoderArgs("mov", 1920, 1080, 30, "/tmp/out.mov");
     expect(args).toContain("prores_ks");
@@ -65,6 +100,54 @@ describe("background-removal/pipeline — buildEncoderArgs", () => {
     expect(args[sIdx + 1]).toBe("640x480");
     const rIdx = args.indexOf("-r");
     expect(args[rIdx + 1]).toBe("24");
+  });
+});
+
+describe("background-removal/pipeline — resolveRenderTargets", () => {
+  it("resolves a normal video → webm render", () => {
+    const t = resolveRenderTargets("/tmp/clip.mp4", "/tmp/cutout.webm");
+    expect(t.format).toBe("webm");
+    expect(t.inputKind).toBe("video");
+    expect(t.bgFormat).toBeUndefined();
+  });
+
+  it("resolves an image → png render", () => {
+    const t = resolveRenderTargets("/tmp/portrait.jpg", "/tmp/cutout.png");
+    expect(t.format).toBe("png");
+    expect(t.inputKind).toBe("image");
+  });
+
+  it("rejects image input with a video output extension", () => {
+    expect(() => resolveRenderTargets("/tmp/portrait.jpg", "/tmp/cutout.webm")).toThrow(
+      /Image input requires a \.png output/,
+    );
+  });
+
+  it("rejects video input with a .png output", () => {
+    expect(() => resolveRenderTargets("/tmp/clip.mp4", "/tmp/cutout.png")).toThrow(
+      /Video input requires a \.webm or \.mov output/,
+    );
+  });
+
+  it("threads background-output format through when valid", () => {
+    const t = resolveRenderTargets("/tmp/clip.mp4", "/tmp/fg.webm", "/tmp/bg.webm");
+    expect(t.bgFormat).toBe("webm");
+    const tMov = resolveRenderTargets("/tmp/clip.mp4", "/tmp/fg.webm", "/tmp/bg.mov");
+    expect(tMov.bgFormat).toBe("mov");
+  });
+
+  it("rejects --background-output for image inputs (no temporal pairing to do)", () => {
+    expect(() =>
+      resolveRenderTargets("/tmp/portrait.jpg", "/tmp/cutout.png", "/tmp/bg.png"),
+    ).toThrow(/--background-output is not supported for image inputs/);
+  });
+
+  it("rejects .png as the --background-output extension", () => {
+    // .png is only valid for single-image inputs, and image inputs themselves
+    // can't have a background-output anyway. So .png here is always a misuse.
+    expect(() => resolveRenderTargets("/tmp/clip.mp4", "/tmp/fg.webm", "/tmp/bg.png")).toThrow(
+      /--background-output must be \.webm or \.mov/,
+    );
   });
 });
 

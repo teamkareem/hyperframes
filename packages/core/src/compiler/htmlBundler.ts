@@ -10,6 +10,7 @@ import {
 import { rewriteAssetPaths, rewriteCssAssetUrls } from "./rewriteSubCompPaths";
 import { scopeCssToComposition, wrapScopedCompositionScript } from "./compositionScoping";
 import { validateHyperframeHtmlContract } from "./staticGuard";
+import { getHyperframeRuntimeScript } from "../generated/runtime-inline";
 
 /** Resolve a relative path within projectDir, rejecting traversal outside it. */
 function safePath(projectDir: string, relativePath: string): string | null {
@@ -26,12 +27,28 @@ function getRuntimeScriptUrl(): string {
   return configured || DEFAULT_RUNTIME_SCRIPT_URL;
 }
 
-function injectInterceptor(html: string): string {
+function injectInterceptor(html: string, runtimeMode: "inline" | "placeholder" = "inline"): string {
   const sanitized = stripEmbeddedRuntimeScripts(html);
   if (sanitized.includes(RUNTIME_BOOTSTRAP_ATTR)) return sanitized;
 
-  const runtimeScriptUrl = getRuntimeScriptUrl().replace(/"/g, "&quot;");
-  const tag = `<script ${RUNTIME_BOOTSTRAP_ATTR}="1" src="${runtimeScriptUrl}"></script>`;
+  // Three modes for the runtime <script>:
+  //   1. HYPERFRAME_RUNTIME_URL env var set → emit src="<url>" (production CDN deploy).
+  //   2. runtime: "placeholder" passed         → emit src="" for the caller to substitute
+  //                                              (studio + vite preview hot-load a local
+  //                                              runtime endpoint via string replace).
+  //   3. runtime: "inline" (default)           → embed the IIFE body directly so the
+  //                                              bundle is genuinely self-contained.
+  const runtimeScriptUrl = getRuntimeScriptUrl();
+  let tag: string;
+  if (runtimeScriptUrl) {
+    const escaped = runtimeScriptUrl.replace(/"/g, "&quot;");
+    tag = `<script ${RUNTIME_BOOTSTRAP_ATTR}="1" src="${escaped}"></script>`;
+  } else if (runtimeMode === "placeholder") {
+    tag = `<script ${RUNTIME_BOOTSTRAP_ATTR}="1" src=""></script>`;
+  } else {
+    const inlinedRuntime = getHyperframeRuntimeScript();
+    tag = `<script ${RUNTIME_BOOTSTRAP_ATTR}="1">${inlinedRuntime}</script>`;
+  }
   if (sanitized.includes("</head>")) {
     return sanitized.replace("</head>", `${tag}\n</head>`);
   }
@@ -268,11 +285,7 @@ function coalesceHeadStylesAndBodyScripts(document: Document): void {
     return !type || type === "text/javascript" || type === "application/javascript";
   });
   if (bodyInlineScripts.length > 0) {
-    const mergedJs = bodyInlineScripts
-      .map((el) => (el.textContent || "").trim())
-      .filter(Boolean)
-      .join("\n;\n")
-      .trim();
+    const mergedJs = joinJsChunks(bodyInlineScripts.map((el) => el.textContent || ""));
     for (const el of bodyInlineScripts) el.remove();
     if (mergedJs) {
       const stripped = stripJsCommentsParserSafe(mergedJs);
@@ -281,6 +294,31 @@ function coalesceHeadStylesAndBodyScripts(document: Document): void {
       document.body.appendChild(inlineScript);
     }
   }
+}
+
+/**
+ * Concatenate JS chunks safely. Goals:
+ *   - Each chunk's last statement is terminated, so joining can't introduce ASI
+ *     surprises (e.g. `a()` followed by `(b)()` — the second chunk would parse
+ *     as a call on the first's return value).
+ *   - In the common case (chunk already ends with `;` — typical of esbuild
+ *     output and IIFE-wrapped composition scripts ending in `})();`), the join
+ *     produces clean output: chunks separated by `\n` with no stray bare
+ *     semicolon lines.
+ *   - Defensive against trailing line comments. If a chunk ends with `// ...`
+ *     and we appended `;` on the same line, the appended semicolon would be
+ *     swallowed by the comment, leaving the next chunk's first statement
+ *     attached to the previous chunk's last expression — exactly the ASI
+ *     hazard this helper exists to prevent. So when a chunk doesn't already
+ *     end in `;`, we append `\n;` instead — the newline closes any line
+ *     comment, and the standalone `;` becomes the statement separator.
+ */
+function joinJsChunks(chunks: string[]): string {
+  return chunks
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0)
+    .map((chunk) => (chunk.endsWith(";") ? chunk : chunk + "\n;"))
+    .join("\n");
 }
 
 function stripJsCommentsParserSafe(source: string): string {
@@ -296,6 +334,22 @@ function stripJsCommentsParserSafe(source: string): string {
 export interface BundleOptions {
   /** Optional media duration prober (e.g., ffprobe). If omitted, media durations are not resolved. */
   probeMediaDuration?: MediaDurationProber;
+  /**
+   * How to handle the HyperFrames runtime <script> tag. Default: `"inline"`.
+   *
+   * - `"inline"` — embed the runtime IIFE body directly into the bundle. Produces
+   *   genuinely self-contained HTML. Right for CLI render output, validate,
+   *   snapshot, and any "ship a single .html file" use case.
+   * - `"placeholder"` — emit `<script ... src=""></script>` so the caller can
+   *   substitute it with a real URL via string replace. Used by the dev studio
+   *   server and vite preview to point at a local runtime endpoint, which keeps
+   *   the runtime cacheable across hot-reloads instead of re-inlining ~150 KB
+   *   on every change.
+   *
+   * The `HYPERFRAME_RUNTIME_URL` env var, when set, takes precedence over both
+   * modes and emits `<script ... src="<URL>">` directly.
+   */
+  runtime?: "inline" | "placeholder";
 }
 
 /**
@@ -324,7 +378,7 @@ export async function bundleToSingleHtml(
     );
   }
 
-  const withInterceptor = injectInterceptor(compiled);
+  const withInterceptor = injectInterceptor(compiled, options?.runtime ?? "inline");
   const document = parseHTMLContent(withInterceptor);
 
   // Inline local CSS
@@ -379,12 +433,13 @@ export async function bundleToSingleHtml(
   }
   if (localJsChunks.length > 0) {
     const anchor = document.querySelector('script[data-hf-bundled-local-js="1"]');
+    const joinedJs = joinJsChunks(localJsChunks);
     if (anchor) {
       anchor.removeAttribute("data-hf-bundled-local-js");
-      anchor.textContent = localJsChunks.join("\n;\n");
+      anchor.textContent = joinedJs;
     } else {
       const script = document.createElement("script");
-      script.textContent = localJsChunks.join("\n;\n");
+      script.textContent = joinedJs;
       document.body.appendChild(script);
     }
   }
@@ -623,7 +678,7 @@ export async function bundleToSingleHtml(
   }
   if (compScriptChunks.length) {
     const compScript = document.createElement("script");
-    compScript.textContent = compScriptChunks.join("\n;\n");
+    compScript.textContent = joinJsChunks(compScriptChunks);
     document.body.appendChild(compScript);
   }
 

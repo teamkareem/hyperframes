@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve, join, dirname } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveProject } from "../utils/project.js";
 import { resolveCompositionViewportFromHtml } from "../utils/compositionViewport.js";
@@ -113,24 +113,10 @@ async function validateInBrowser(
   const { bundleToSingleHtml } = await import("@hyperframes/core/compiler");
   const { ensureBrowser } = await import("../browser/manager.js");
 
-  let html = await bundleToSingleHtml(projectDir);
-
-  const runtimePath = resolve(
-    __dirname,
-    "..",
-    "..",
-    "..",
-    "core",
-    "dist",
-    "hyperframe.runtime.iife.js",
-  );
-  if (existsSync(runtimePath)) {
-    const runtimeSource = readFileSync(runtimePath, "utf-8");
-    html = html.replace(
-      /<script[^>]*data-hyperframes-preview-runtime[^>]*src="[^"]*"[^>]*><\/script>/,
-      () => `<script data-hyperframes-preview-runtime="1">${runtimeSource}</script>`,
-    );
-  }
+  // `bundleToSingleHtml` now inlines the runtime IIFE by default, so the
+  // previous post-bundle regex substitution (which matched `src="..."` on the
+  // runtime tag) is no longer needed — there's no `src` attribute to match.
+  const html = await bundleToSingleHtml(projectDir);
 
   const { createServer } = await import("node:http");
   const { getMimeType } = await import("@hyperframes/core/studio-api");
@@ -162,18 +148,22 @@ async function validateInBrowser(
   const errors: ConsoleEntry[] = [];
   const warnings: ConsoleEntry[] = [];
   let contrast: ContrastEntry[] | undefined;
+  const viewport = resolveCompositionViewportFromHtml(html);
 
   try {
     const browser = await ensureBrowser();
     const puppeteer = await import("puppeteer-core");
+    const { buildChromeArgs } = await import("@hyperframes/engine");
+    const browserGpuMode =
+      process.env.PRODUCER_BROWSER_GPU_MODE === "software" ? "software" : "hardware";
     const chromeBrowser = await puppeteer.default.launch({
       headless: true,
       executablePath: browser.executablePath,
-      args: ["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
+      args: buildChromeArgs({ ...viewport, captureMode: "screenshot" }, { browserGpuMode }),
     });
 
     const page = await chromeBrowser.newPage();
-    await page.setViewport(resolveCompositionViewportFromHtml(html));
+    await page.setViewport(viewport);
 
     page.on("console", (msg) => {
       const type = msg.type();

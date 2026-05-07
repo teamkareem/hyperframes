@@ -1,4 +1,5 @@
 import { scopeCssToComposition, wrapScopedCompositionScript } from "../compiler/compositionScoping";
+import { readDeclaredDefaults } from "./getVariables";
 
 type LoadExternalCompositionsParams = {
   injectedStyles: HTMLStyleElement[];
@@ -73,6 +74,19 @@ function resolveScriptSourceUrl(scriptSrc: string, compositionUrl: URL | null): 
   }
 }
 
+function parseHostVariableValues(host: Element): Record<string, unknown> {
+  const raw = host.getAttribute("data-variable-values");
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  return parsed as Record<string, unknown>;
+}
+
 async function mountCompositionContent(params: {
   host: Element;
   hostCompositionId: string | null;
@@ -88,6 +102,15 @@ async function mountCompositionContent(params: {
   headStyles?: HTMLStyleElement[];
   /** Extra <script> elements from the parsed document <head> (non-template sub-compositions). */
   headScripts?: HTMLScriptElement[];
+  /**
+   * Defaults extracted from the sub-composition's own
+   * `<html data-composition-variables="...">` attribute. Layered under the
+   * host element's `data-variable-values` to produce the per-instance
+   * variables visible inside the sub-comp's scoped `getVariables()`.
+   * Populated only by `loadExternalCompositions`; inline templates have no
+   * separate document root so no declared defaults are passed.
+   */
+  declaredVariableDefaults?: Record<string, unknown>;
   onDiagnostic?: (payload: {
     code: string;
     details: Record<string, string | number | boolean | null | string[]>;
@@ -209,6 +232,21 @@ async function mountCompositionContent(params: {
     params.host.appendChild(document.importNode(contentNode, true));
   } else {
     params.host.innerHTML = params.fallbackBodyInnerHtml;
+  }
+
+  // Stash the per-instance variables BEFORE running scripts. The scoped
+  // `getVariables()` injected by `compositionScoping.ts` reads from
+  // `window.__hfVariablesByComp[compId]`, so this table must be populated
+  // before the wrapped IIFE evaluates.
+  if (scopeCompositionId) {
+    const merged = {
+      ...(params.declaredVariableDefaults ?? {}),
+      ...parseHostVariableValues(params.host),
+    };
+    if (Object.keys(merged).length > 0) {
+      if (!window.__hfVariablesByComp) window.__hfVariablesByComp = {};
+      window.__hfVariablesByComp[scopeCompositionId] = merged;
+    }
   }
 
   for (const scriptPayload of scriptPayloads) {
@@ -371,6 +409,7 @@ export async function loadExternalCompositions(
           parseDimensionPx: params.parseDimensionPx,
           headStyles,
           headScripts,
+          declaredVariableDefaults: readDeclaredDefaults(doc.documentElement),
           onDiagnostic: params.onDiagnostic,
         });
       } catch (error) {

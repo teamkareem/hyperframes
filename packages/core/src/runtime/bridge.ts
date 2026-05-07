@@ -1,3 +1,4 @@
+import { swallow } from "./diagnostics";
 import type { RuntimeBridgeControlMessage, RuntimeOutboundMessage } from "./types";
 
 type BridgeDeps = {
@@ -5,6 +6,7 @@ type BridgeDeps = {
   onPause: () => void;
   onSeek: (frame: number, seekMode: "drag" | "commit") => void;
   onSetMuted: (muted: boolean) => void;
+  onSetVolume: (volume: number) => void;
   onSetMediaOutputMuted: (muted: boolean) => void;
   onSetPlaybackRate: (rate: number) => void;
   onEnablePickMode: () => void;
@@ -14,8 +16,9 @@ type BridgeDeps = {
 export function postRuntimeMessage(payload: RuntimeOutboundMessage): void {
   try {
     window.parent.postMessage(payload, "*");
-  } catch {
-    // Ignore cross-frame posting failures.
+  } catch (err) {
+    // Cross-frame posting can throw if the parent is gone or origin-isolated.
+    swallow("bridge.postMessage", err);
   }
 }
 
@@ -38,6 +41,10 @@ export function installRuntimeControlBridge(deps: BridgeDeps): (event: MessageEv
     }
     if (action === "set-muted") {
       deps.onSetMuted(Boolean(data.muted));
+      return;
+    }
+    if (action === "set-volume") {
+      deps.onSetVolume(Math.max(0, Math.min(1, Number(data.volume ?? 1))));
       return;
     }
     if (action === "set-media-output-muted") {
@@ -99,8 +106,9 @@ function flashElements(selectors: string[], duration: number): void {
         el.classList.add("__hf-flash");
         setTimeout(() => el.classList.remove("__hf-flash"), duration);
       });
-    } catch {
+    } catch (err) {
       // Invalid selector — skip
+      swallow("bridge.flashElements.querySelector", err);
     }
   }
 }

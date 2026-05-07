@@ -25,7 +25,7 @@ export default defineCommand({
     // Resolve runtime path — same logic as studioServer.ts
     const runtimePath = resolveRuntimePath();
     if (!runtimePath) {
-      clack.log.error("HyperFrames runtime not found. Run `pnpm build` first.");
+      clack.log.error("HyperFrames runtime not found. Run `bun run build` first.");
       process.exitCode = 1;
       return;
     }
@@ -33,7 +33,9 @@ export default defineCommand({
     // Resolve player path
     const playerPath = resolvePlayerPath();
     if (!playerPath) {
-      clack.log.error("@hyperframes/player not found. Run `pnpm build` in packages/player first.");
+      clack.log.error(
+        "@hyperframes/player not found. Run `bun run --cwd packages/player build` first.",
+      );
       process.exitCode = 1;
       return;
     }

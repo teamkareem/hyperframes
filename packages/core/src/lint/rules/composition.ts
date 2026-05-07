@@ -1,5 +1,6 @@
 import type { LintContext, HyperframeLintFinding } from "../context";
-import { readAttr, truncateSnippet } from "../utils";
+import { findHtmlTag, readAttr, readJsonAttr, truncateSnippet } from "../utils";
+import { COMPOSITION_VARIABLE_TYPES } from "../../core.types";
 
 // Agent guidance thresholds: warning-only nudges for files/tracks that become hard
 // to inspect and revise reliably in a single composition.
@@ -48,7 +49,7 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
       {
         code: "composition_file_too_large",
         severity: "warning",
-        message: `This HTML composition file has ${lineCount} lines. Agents produce better results when large scenes are split into smaller sub-compositions.`,
+        message: `This HTML composition file has ${lineCount} lines. Smaller sub-compositions are easier to read, iterate on, and diff.`,
         fixHint: `${splitTarget}, then mount them from the parent with data-composition-src so each file stays small enough to inspect, revise, and validate independently.`,
       },
     ];
@@ -76,7 +77,7 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
       findings.push({
         code: "timeline_track_too_dense",
         severity: "warning",
-        message: `Track ${track} has ${count} timed elements in this HTML file. Agents produce better timelines when dense tracks are split into smaller sub-compositions.`,
+        message: `Track ${track} has ${count} timed elements in this HTML file. Smaller sub-compositions keep timelines easier to read, iterate on, and diff.`,
         fixHint: `${splitTarget} and mount them from the parent with data-composition-src so the timeline stays easier to inspect, revise, and validate.`,
       });
     }
@@ -383,6 +384,122 @@ export const compositionRules: Array<(ctx: LintContext) => HyperframeLintFinding
           fixHint:
             "Use GSAP tweens or onUpdate callbacks instead of requestAnimationFrame for animation logic.",
           snippet: truncateSnippet(script.content),
+        });
+      }
+    }
+    return findings;
+  },
+
+  // invalid_variable_values_json
+  // Host elements (`[data-composition-src]`) carry per-instance values via
+  // `data-variable-values`. The runtime swallows JSON errors silently and
+  // falls back to declared defaults, which masks typos. This rule surfaces
+  // the parse failure so authors notice before render time.
+  ({ tags }) => {
+    const findings: HyperframeLintFinding[] = [];
+    for (const tag of tags) {
+      const raw = readJsonAttr(tag.raw, "data-variable-values");
+      if (!raw) continue;
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "unknown";
+        findings.push({
+          code: "invalid_variable_values_json",
+          severity: "warning",
+          message: `data-variable-values is not valid JSON (${reason}).`,
+          fixHint:
+            'Wrap the attribute value in single quotes and the JSON keys/values in double quotes, e.g. data-variable-values=\'{"title":"Hello"}\'.',
+          elementId: readAttr(tag.raw, "id") || undefined,
+          snippet: truncateSnippet(tag.raw),
+        });
+        continue;
+      }
+
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        findings.push({
+          code: "invalid_variable_values_json",
+          severity: "warning",
+          message:
+            'data-variable-values must be a JSON object keyed by variable id (e.g. {"title":"Hello"}).',
+          fixHint:
+            "Replace the value with a JSON object whose keys are variable ids declared in the sub-composition's data-composition-variables.",
+          elementId: readAttr(tag.raw, "id") || undefined,
+          snippet: truncateSnippet(tag.raw),
+        });
+      }
+    }
+    return findings;
+  },
+
+  // invalid_composition_variables_declaration
+  // The runtime parses `data-composition-variables` and silently returns []
+  // on any structural problem. Surface JSON / shape failures so authors
+  // catch them at lint time rather than wondering why their `getVariables()`
+  // defaults aren't applied.
+  ({ source }) => {
+    const htmlTag = findHtmlTag(source);
+    if (!htmlTag) return [];
+    const raw = readJsonAttr(htmlTag.raw, "data-composition-variables");
+    if (!raw) return [];
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "unknown";
+      return [
+        {
+          code: "invalid_composition_variables_declaration",
+          severity: "warning",
+          message: `data-composition-variables is not valid JSON (${reason}).`,
+          fixHint:
+            'Provide a JSON array of variable declarations: data-composition-variables=\'[{"id":"title","type":"string","label":"Title","default":"Hello"}]\'.',
+          snippet: truncateSnippet(htmlTag.raw),
+        },
+      ];
+    }
+
+    if (!Array.isArray(parsed)) {
+      return [
+        {
+          code: "invalid_composition_variables_declaration",
+          severity: "warning",
+          message: "data-composition-variables must be a JSON array of variable declarations.",
+          fixHint:
+            'Wrap declarations in [] and give each an id, type, label, and default: \'[{"id":"title","type":"string","label":"Title","default":"Hello"}]\'.',
+          snippet: truncateSnippet(htmlTag.raw),
+        },
+      ];
+    }
+
+    const findings: HyperframeLintFinding[] = [];
+    const knownTypes = new Set<string>(COMPOSITION_VARIABLE_TYPES);
+    for (let i = 0; i < parsed.length; i += 1) {
+      const entry = parsed[i];
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        findings.push({
+          code: "invalid_composition_variables_declaration",
+          severity: "warning",
+          message: `data-composition-variables entry [${i}] must be an object with id, type, label, and default.`,
+          snippet: truncateSnippet(htmlTag.raw),
+        });
+        continue;
+      }
+      const e = entry as Record<string, unknown>;
+      const missing: string[] = [];
+      if (typeof e.id !== "string") missing.push("id");
+      if (typeof e.type !== "string" || !knownTypes.has(e.type as string)) missing.push("type");
+      if (typeof e.label !== "string") missing.push("label");
+      if (!("default" in e)) missing.push("default");
+      if (missing.length > 0) {
+        findings.push({
+          code: "invalid_composition_variables_declaration",
+          severity: "warning",
+          message: `data-composition-variables entry [${i}] is missing or has invalid: ${missing.join(", ")}. Type must be one of string, number, color, boolean, enum.`,
+          snippet: truncateSnippet(htmlTag.raw),
         });
       }
     }

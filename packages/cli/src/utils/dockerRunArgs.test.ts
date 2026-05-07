@@ -161,6 +161,7 @@ describe("buildDockerRunArgs", () => {
         crf: 16,
         videoBitrate: undefined,
         quiet: true,
+        entryFile: "compositions/intro.html",
       },
     });
     // Each value must reach the container exactly once. If a future option
@@ -176,6 +177,19 @@ describe("buildDockerRunArgs", () => {
     expect(args).toContain("--gpu");
     expect(args).toContain("--no-browser-gpu");
     expect(args).toContain("--hdr");
+    expect(args).toContain("--composition");
+    expect(args).toContain("compositions/intro.html");
+  });
+
+  it("forwards --format png-sequence to the container", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      outputFilename: "frames",
+      options: { ...BASE, format: "png-sequence" },
+    });
+    const formatIdx = args.indexOf("--format");
+    expect(formatIdx).toBeGreaterThanOrEqual(0);
+    expect(args[formatIdx + 1]).toBe("png-sequence");
   });
 
   it("forwards --video-bitrate to the container when set", () => {
@@ -209,5 +223,20 @@ describe("buildDockerRunArgs", () => {
       options: { ...BASE, variables: {} },
     });
     expect(args).not.toContain("--variables");
+  });
+
+  it("forwards --composition to the container when entryFile is set", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, entryFile: "compositions/intro.html" },
+    });
+    const idx = args.indexOf("--composition");
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe("compositions/intro.html");
+  });
+
+  it("omits --composition when entryFile is not set", () => {
+    const args = buildDockerRunArgs({ ...FIXED_INPUT, options: BASE });
+    expect(args).not.toContain("--composition");
   });
 });

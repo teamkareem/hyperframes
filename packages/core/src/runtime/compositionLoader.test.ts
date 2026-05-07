@@ -264,6 +264,144 @@ describe("loadExternalCompositions", () => {
     expect(host1.querySelector("p")?.textContent).toBe("A");
     expect(host2.querySelector("p")?.textContent).toBe("B");
   });
+
+  describe("variable scoping (window.__hfVariablesByComp)", () => {
+    type WindowWithScopedVars = Window & {
+      __hfVariablesByComp?: Record<string, Record<string, unknown>>;
+    };
+
+    afterEach(() => {
+      delete (window as WindowWithScopedVars).__hfVariablesByComp;
+    });
+
+    it("merges sub-comp declared defaults with host data-variable-values", async () => {
+      const host = document.createElement("div");
+      host.setAttribute("data-composition-src", "https://example.com/card.html");
+      host.setAttribute("data-composition-id", "card-1");
+      host.setAttribute("data-variable-values", '{"title":"Pro","price":"$29"}');
+      document.body.appendChild(host);
+
+      const compositionHtml = `
+        <html data-composition-variables='[
+          {"id":"title","type":"string","label":"Title","default":"Default"},
+          {"id":"price","type":"string","label":"Price","default":"$0"},
+          {"id":"theme","type":"string","label":"Theme","default":"light"}
+        ]'>
+          <body>
+            <div data-composition-id="card-1"><p>card</p></div>
+          </body>
+        </html>
+      `;
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(compositionHtml, { status: 200 }),
+      );
+
+      await loadExternalCompositions({ ...defaultParams });
+
+      const byComp = (window as WindowWithScopedVars).__hfVariablesByComp ?? {};
+      expect(byComp["card-1"]).toEqual({
+        title: "Pro", // host wins over declared default
+        price: "$29", // host wins
+        theme: "light", // host omits → declared default falls through
+      });
+    });
+
+    it("uses declared defaults when host has no data-variable-values", async () => {
+      const host = document.createElement("div");
+      host.setAttribute("data-composition-src", "https://example.com/card.html");
+      host.setAttribute("data-composition-id", "card-2");
+      document.body.appendChild(host);
+
+      const compositionHtml = `
+        <html data-composition-variables='[
+          {"id":"title","type":"string","label":"Title","default":"Default Title"}
+        ]'>
+          <body><div data-composition-id="card-2"><p>x</p></div></body>
+        </html>
+      `;
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(compositionHtml, { status: 200 }),
+      );
+
+      await loadExternalCompositions({ ...defaultParams });
+
+      const byComp = (window as WindowWithScopedVars).__hfVariablesByComp ?? {};
+      expect(byComp["card-2"]).toEqual({ title: "Default Title" });
+    });
+
+    it("skips registration when neither declared defaults nor host overrides exist", async () => {
+      const host = document.createElement("div");
+      host.setAttribute("data-composition-src", "https://example.com/card.html");
+      host.setAttribute("data-composition-id", "card-empty");
+      document.body.appendChild(host);
+
+      const compositionHtml = `
+        <html><body><div data-composition-id="card-empty"><p>x</p></div></body></html>
+      `;
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(compositionHtml, { status: 200 }),
+      );
+
+      await loadExternalCompositions({ ...defaultParams });
+
+      const byComp = (window as WindowWithScopedVars).__hfVariablesByComp;
+      expect(byComp?.["card-empty"]).toBeUndefined();
+    });
+
+    it("ignores invalid JSON in host data-variable-values", async () => {
+      const host = document.createElement("div");
+      host.setAttribute("data-composition-src", "https://example.com/card.html");
+      host.setAttribute("data-composition-id", "card-bad");
+      host.setAttribute("data-variable-values", "{not json");
+      document.body.appendChild(host);
+
+      const compositionHtml = `
+        <html data-composition-variables='[{"id":"title","type":"string","label":"Title","default":"OK"}]'>
+          <body><div data-composition-id="card-bad"><p>x</p></div></body>
+        </html>
+      `;
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(compositionHtml, { status: 200 }),
+      );
+
+      await loadExternalCompositions({ ...defaultParams });
+
+      const byComp = (window as WindowWithScopedVars).__hfVariablesByComp ?? {};
+      expect(byComp["card-bad"]).toEqual({ title: "OK" });
+    });
+
+    it("registers per-instance entries for multiple sub-comps with the same source", async () => {
+      const host1 = document.createElement("div");
+      host1.setAttribute("data-composition-src", "https://example.com/card.html");
+      host1.setAttribute("data-composition-id", "card-A");
+      host1.setAttribute("data-variable-values", '{"title":"Pro","price":"$29"}');
+      document.body.appendChild(host1);
+
+      const host2 = document.createElement("div");
+      host2.setAttribute("data-composition-src", "https://example.com/card.html");
+      host2.setAttribute("data-composition-id", "card-B");
+      host2.setAttribute("data-variable-values", '{"title":"Enterprise","price":"Custom"}');
+      document.body.appendChild(host2);
+
+      const compositionHtml = `
+        <html data-composition-variables='[
+          {"id":"title","type":"string","label":"Title","default":"Default"},
+          {"id":"price","type":"string","label":"Price","default":"$0"}
+        ]'>
+          <body><div data-composition-id="card-A"><p>x</p></div></body>
+        </html>
+      `;
+      vi.spyOn(globalThis, "fetch").mockImplementation(
+        async () => new Response(compositionHtml, { status: 200 }),
+      );
+
+      await loadExternalCompositions({ ...defaultParams });
+
+      const byComp = (window as WindowWithScopedVars).__hfVariablesByComp ?? {};
+      expect(byComp["card-A"]).toEqual({ title: "Pro", price: "$29" });
+      expect(byComp["card-B"]).toEqual({ title: "Enterprise", price: "Custom" });
+    });
+  });
 });
 
 describe("loadInlineTemplateCompositions", () => {

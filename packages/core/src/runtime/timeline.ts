@@ -4,6 +4,7 @@ import type {
   RuntimeTimelineScene,
   RuntimeTimelineLike,
 } from "./types";
+import { swallow } from "./diagnostics";
 import { createRuntimeStartTimeResolver } from "./startResolver";
 
 const AUTHORED_DURATION_ATTR = "data-hf-authored-duration";
@@ -565,8 +566,9 @@ export function collectRuntimeTimelinePayload(params: {
           });
           gsapClipIds.add(el.id);
         }
-      } catch {
+      } catch (err) {
         // GSAP introspection is best-effort — don't break timeline if it fails
+        swallow("runtime.timeline.site1", err);
       }
     }
   }

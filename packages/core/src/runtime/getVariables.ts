@@ -1,9 +1,16 @@
 /**
  * Reads the resolved variables for the current composition.
  *
- * Resolves to declared defaults from `<html data-composition-variables="...">`
+ * Top-level path: declared defaults from `<html data-composition-variables="...">`
  * merged with `window.__hfVariables` (set at render time by the engine when
  * the user passes `hyperframes render --variables '<json>'`).
+ *
+ * Sub-comp path (per-instance scoping): when called inside a sub-composition
+ * script wrapped by `compositionScoping.ts`, the wrapper shadows
+ * `__hyperframes.getVariables` with a scoped variant that returns the
+ * pre-merged values from `window.__hfVariablesByComp[compositionId]`. The
+ * loader populates that table before running scripts, layering the host
+ * element's `data-variable-values` over the sub-comp's declared defaults.
  *
  * Returns `Partial<T>` because not every declared variable is guaranteed to
  * have a default, and not every key in `__hfVariables` is guaranteed to be
@@ -23,7 +30,13 @@ export function getVariables<
   return { ...declaredDefaults, ...overrides } as Partial<T>;
 }
 
-function readDeclaredDefaults(root: Element | null): Record<string, unknown> {
+/**
+ * Extract `{id: default}` map from an element's `data-composition-variables`
+ * attribute. Returns an empty object when the attribute is missing, the JSON
+ * is unparseable, or the payload isn't an array. Exported so the
+ * compositionLoader can compute the same defaults map for sub-comp instances.
+ */
+export function readDeclaredDefaults(root: Element | null): Record<string, unknown> {
   if (!root) return {};
   const raw = root.getAttribute("data-composition-variables");
   if (!raw) return {};

@@ -8,12 +8,13 @@ import {
   lstatSync,
   realpathSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import type {
   StudioApiAdapter,
   ResolvedProject,
   RenderJobState,
 } from "@hyperframes/core/studio-api";
+import { createProjectSignature } from "../core/src/studio-api/helpers/projectSignature";
 import { createRetryingModuleLoader, ensureProducerDist } from "./vite.producer";
 import { readNodeRequestBody } from "./vite.request-body.js";
 import { seekThumbnailPreview } from "./vite.thumbnail";
@@ -56,11 +57,21 @@ interface ScreenshotClip {
   height: number;
 }
 
+function isPathWithin(parentDir: string, childPath: string): boolean {
+  const childRelativePath = relative(resolve(parentDir), resolve(childPath));
+  return (
+    childRelativePath === "" ||
+    (!childRelativePath.startsWith("..") && !isAbsolute(childRelativePath))
+  );
+}
+
 // ── Vite adapter for the shared studio API ───────────────────────────────────
 
 function createViteAdapter(dataDir: string, server: ViteDevServer): StudioApiAdapter {
   // Lazy-load the bundler via Vite's SSR module loader
-  let _bundler: ((dir: string) => Promise<string>) | null = null;
+  let _bundler:
+    | ((dir: string, options?: { runtime?: "inline" | "placeholder" }) => Promise<string>)
+    | null = null;
   let _producerModulePromise: Promise<{
     createRenderJob: (config: {
       fps: 24 | 30 | 60;
@@ -74,11 +85,17 @@ function createViteAdapter(dataDir: string, server: ViteDevServer): StudioApiAda
       onProgress?: (job: { progress: number; currentStage?: string }) => void,
     ) => Promise<void>;
   }> | null = null;
+  const projectSignatureCache = new Map<string, string>();
+  server.watcher.on("all", (_event, file) => {
+    for (const projectDir of projectSignatureCache.keys()) {
+      if (isPathWithin(projectDir, file)) projectSignatureCache.delete(projectDir);
+    }
+  });
   const getBundler = async () => {
     if (!_bundler) {
       try {
         const mod = await server.ssrLoadModule("@hyperframes/core/compiler");
-        _bundler = (dir: string) => mod.bundleToSingleHtml(dir);
+        _bundler = (dir, options) => mod.bundleToSingleHtml(dir, options);
       } catch (err) {
         console.warn("[Studio] Failed to load compiler, previews will use raw HTML:", err);
         _bundler = null as never;
@@ -171,13 +188,25 @@ function createViteAdapter(dataDir: string, server: ViteDevServer): StudioApiAda
     async bundle(dir: string) {
       const bundler = await getBundler();
       if (!bundler) return null;
-      let html = await bundler(dir);
-      // Fix empty runtime src from bundler — point to the CDN runtime
+      // Studio vite preview: bundler emits an empty `src=""` placeholder so we
+      // can point it at the local /api/runtime.js endpoint. Cached by the browser
+      // across composition hot-reloads instead of being inlined fresh each time.
+      let html = await bundler(dir, { runtime: "placeholder" });
       html = html.replace(
         'data-hyperframes-preview-runtime="1" src=""',
         `data-hyperframes-preview-runtime="1" src="${this.runtimeUrl}"`,
       );
       return html;
+    },
+
+    getProjectSignature(projectDir: string): string {
+      const cacheKey = resolve(projectDir);
+      const cached = projectSignatureCache.get(cacheKey);
+      if (cached) return cached;
+
+      const signature = createProjectSignature(cacheKey);
+      projectSignatureCache.set(cacheKey, signature);
+      return signature;
     },
 
     async lint(html: string, opts?: { filePath?: string }) {

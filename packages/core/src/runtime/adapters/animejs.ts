@@ -1,4 +1,5 @@
 import type { RuntimeDeterministicAdapter } from "../types";
+import { swallow } from "../diagnostics";
 
 /**
  * anime.js adapter for HyperFrames
@@ -61,8 +62,9 @@ export function createAnimeJsAdapter(): RuntimeDeterministicAdapter {
           }
         }
         (window as AnimeWindow).__hfAnime = existing;
-      } catch {
+      } catch (err) {
         // ignore discovery failures
+        swallow("runtime.adapters.animejs.site1", err);
       }
     },
 
@@ -76,8 +78,9 @@ export function createAnimeJsAdapter(): RuntimeDeterministicAdapter {
           if (typeof instance.seek === "function") {
             instance.seek(timeMs);
           }
-        } catch {
+        } catch (err) {
           // ignore per-instance failures — keep going for other instances
+          swallow("runtime.adapters.animejs.site2", err);
         }
       }
     },
@@ -91,8 +94,9 @@ export function createAnimeJsAdapter(): RuntimeDeterministicAdapter {
           if (typeof instance.pause === "function") {
             instance.pause();
           }
-        } catch {
+        } catch (err) {
           // ignore
+          swallow("runtime.adapters.animejs.site3", err);
         }
       }
     },
@@ -106,8 +110,9 @@ export function createAnimeJsAdapter(): RuntimeDeterministicAdapter {
           if (typeof instance.play === "function") {
             instance.play();
           }
-        } catch {
+        } catch (err) {
           // ignore
+          swallow("runtime.adapters.animejs.site4", err);
         }
       }
     },

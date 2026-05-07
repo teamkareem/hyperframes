@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import * as clack from "@clack/prompts";
 import { c } from "../ui/colors.js";
 import { isDevice, DEVICES } from "../background-removal/manager.js";
+import { DEFAULT_QUALITY, QUALITIES, isQuality } from "../background-removal/pipeline.js";
 import type { Example } from "./_examples.js";
 
 export const examples: Example[] = [
@@ -20,8 +21,20 @@ export const examples: Example[] = [
     "hyperframes remove-background portrait.jpg -o cutout.png",
   ],
   [
+    "Separate the layers — emit both the cutout and an inverse-alpha background plate (subject region transparent)",
+    "hyperframes remove-background avatar.mp4 -o subject.webm --background-output plate.webm",
+  ],
+  [
     "Force CPU (skip CoreML/CUDA)",
     "hyperframes remove-background avatar.mp4 -o transparent.webm --device cpu",
+  ],
+  [
+    "Smaller file at the cost of color match (text-behind-subject won't blend as cleanly)",
+    "hyperframes remove-background avatar.mp4 -o transparent.webm --quality fast",
+  ],
+  [
+    "Visually-lossless WebM (master / re-encode source)",
+    "hyperframes remove-background avatar.mp4 -o transparent.webm --quality best",
   ],
   ["Show detected providers without rendering", "hyperframes remove-background --info"],
 ];
@@ -43,10 +56,21 @@ export default defineCommand({
       description: "Output path. Format inferred from extension: .webm (default), .mov, .png",
       alias: "o",
     },
+    "background-output": {
+      type: "string",
+      description:
+        "Optional second output path for the inverse-alpha background plate (subject region transparent, original surroundings opaque). Hole-cut, not inpainted — composite something underneath to fill the hole. Must be .webm or .mov; not allowed for image inputs.",
+      alias: "b",
+    },
     device: {
       type: "string",
       description: `Execution provider: ${DEVICES.join(", ")}`,
       default: "auto",
+    },
+    quality: {
+      type: "string",
+      description: `Encoder quality preset for .webm output: ${QUALITIES.join(", ")} (default: ${DEFAULT_QUALITY}). Higher quality = closer color match when overlaying on the source mp4, larger file. Ignored for .mov / .png.`,
+      default: DEFAULT_QUALITY,
     },
     info: {
       type: "boolean",
@@ -81,9 +105,17 @@ export default defineCommand({
       );
       process.exit(1);
     }
+    if (!isQuality(args.quality)) {
+      console.error(
+        c.error(`Invalid --quality '${String(args.quality)}'. Use: ${QUALITIES.join(", ")}.`),
+      );
+      process.exit(1);
+    }
 
     const inputPath = resolve(args.input);
     const outputPath = resolve(args.output);
+    const backgroundOutputArg = args["background-output"];
+    const backgroundOutputPath = backgroundOutputArg ? resolve(backgroundOutputArg) : undefined;
 
     const { render } = await import("../background-removal/pipeline.js");
 
@@ -94,7 +126,9 @@ export default defineCommand({
       const result = await render({
         inputPath,
         outputPath,
+        backgroundOutputPath,
         device: args.device,
+        quality: args.quality,
         onProgress: (event) => {
           if (event.kind === "info") {
             spin?.message(event.message);
@@ -116,6 +150,9 @@ export default defineCommand({
           JSON.stringify({
             ok: true,
             outputPath: result.outputPath,
+            ...(result.backgroundOutputPath
+              ? { backgroundOutputPath: result.backgroundOutputPath }
+              : {}),
             framesProcessed: result.framesProcessed,
             durationSeconds: Number(result.durationSeconds.toFixed(2)),
             avgMsPerFrame: Number(result.avgMsPerFrame.toFixed(1)),
@@ -127,9 +164,12 @@ export default defineCommand({
         const fpsThroughput = result.durationSeconds
           ? (result.framesProcessed / result.durationSeconds).toFixed(1)
           : "n/a";
+        const outputs = result.backgroundOutputPath
+          ? `${c.accent(result.outputPath)} + ${c.accent(result.backgroundOutputPath)}`
+          : c.accent(result.outputPath);
         spin?.stop(
           c.success(
-            `Removed background from ${c.accent(String(result.framesProcessed))} frames in ${result.durationSeconds.toFixed(1)}s (${fpsThroughput} fps, ${c.accent(result.provider)}) → ${c.accent(result.outputPath)}`,
+            `Removed background from ${c.accent(String(result.framesProcessed))} frames in ${result.durationSeconds.toFixed(1)}s (${fpsThroughput} fps, ${c.accent(result.provider)}) → ${outputs}`,
           ),
         );
       }

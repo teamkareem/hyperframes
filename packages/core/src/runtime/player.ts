@@ -1,5 +1,6 @@
 import type { RuntimePlayer, RuntimeTimelineLike } from "./types";
 import { quantizeTimeToFrame } from "../inline-scripts/parityContract";
+import { swallow } from "./diagnostics";
 
 type PlayerDeps = {
   getTimeline: () => RuntimeTimelineLike | null;
@@ -38,8 +39,9 @@ function forEachSiblingTimeline(
     if (!tl || tl === master) continue;
     try {
       fn(tl);
-    } catch {
+    } catch (err) {
       // ignore sibling failures — one broken timeline shouldn't poison play/pause
+      swallow("runtime.player.site1", err);
     }
   }
 }
@@ -76,8 +78,9 @@ function seekMasterAndSiblingTimelinesDeterministically(
     for (const tl of rearmedSiblings) {
       try {
         tl.pause();
-      } catch {
+      } catch (err) {
         // ignore sibling failures — one broken timeline shouldn't poison seek
+        swallow("runtime.player.site2", err);
       }
     }
   }

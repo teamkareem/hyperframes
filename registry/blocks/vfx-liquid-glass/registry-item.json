@@ -1,0 +1,21 @@
+{
+  "$schema": "https://hyperframes.heygen.com/schema/registry-item.json",
+  "name": "vfx-liquid-glass",
+  "type": "hyperframes:block",
+  "title": "Liquid Glass",
+  "description": "VFX composition block",
+  "stability": "experimental",
+  "dimensions": {
+    "width": 1920,
+    "height": 1080
+  },
+  "duration": 20,
+  "tags": ["html-in-canvas", "webgl"],
+  "files": [
+    {
+      "path": "vfx-liquid-glass.html",
+      "target": "compositions/vfx-liquid-glass.html",
+      "type": "hyperframes:composition"
+    }
+  ]
+}

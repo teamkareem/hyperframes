@@ -21,7 +21,7 @@ export interface DockerRunArgsInput {
 export interface DockerRenderOptions {
   fps: 24 | 30 | 60;
   quality: "draft" | "standard" | "high";
-  format: "mp4" | "webm" | "mov";
+  format: "mp4" | "webm" | "mov" | "png-sequence";
   workers?: number;
   gpu: boolean;
   browserGpu: boolean;
@@ -30,6 +30,7 @@ export interface DockerRenderOptions {
   videoBitrate?: string;
   quiet: boolean;
   variables?: Record<string, unknown>;
+  entryFile?: string;
 }
 
 export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
@@ -67,5 +68,6 @@ export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
     ...(options.variables && Object.keys(options.variables).length > 0
       ? ["--variables", JSON.stringify(options.variables)]
       : []),
+    ...(options.entryFile ? ["--composition", options.entryFile] : []),
   ];
 }

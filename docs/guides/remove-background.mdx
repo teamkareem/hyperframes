@@ -25,7 +25,7 @@ The CLI ships a built-in `remove-background` command that runs locally — no AP
   </Step>
   <Step title="Remove the background from your video">
     ```bash Terminal
-    npx hyperframes remove-background avatar.mp4 -o transparent.webm
+    npx hyperframes remove-background subject.mp4 -o transparent.webm
     ```
 
     On the first run, the CLI downloads ~168 MB of model weights to `~/.cache/hyperframes/background-removal/models/`. Subsequent runs reuse the cache.
@@ -44,7 +44,7 @@ The CLI ships a built-in `remove-background` command that runs locally — no AP
       <!-- background layer -->
       <img src="city.jpg" class="bg" />
 
-      <!-- transparent avatar floats on top -->
+      <!-- transparent subject floats on top -->
       <video src="transparent.webm" autoplay muted loop playsinline></video>
     </div>
     ```
@@ -75,10 +75,75 @@ The output is encoded with the exact ffmpeg flags Chrome's `<video>` element nee
 | `.png` | PNG with alpha | Single-image cutout (only when the input is also a single image) | varies |
 
 ```bash Terminal
-npx hyperframes remove-background avatar.mp4 -o transparent.webm        # web playback
-npx hyperframes remove-background avatar.mp4 -o transparent.mov         # editing
+npx hyperframes remove-background subject.mp4 -o transparent.webm        # web playback
+npx hyperframes remove-background subject.mp4 -o transparent.mov         # editing
 npx hyperframes remove-background portrait.jpg -o cutout.png       # still image
 ```
+
+## Layer separation: emit the cutout and the background plate together
+
+Pass `--background-output` (alias `-b`) to write a *second* transparent video alongside the cutout. Same source RGB, alpha is the *inverse* mask — opaque where the surroundings were, transparent where the subject is. The result is a clean two-layer separation in a single inference pass:
+
+```bash Terminal
+npx hyperframes remove-background subject.mp4 \
+  -o subject.webm \
+  --background-output plate.webm
+```
+
+| Output | Alpha | Use it as |
+| ------ | ----- | --------- |
+| `subject.webm` | Mask — subject opaque | Foreground layer (top of stack) |
+| `plate.webm` | `255 − mask` — subject region transparent | Background layer; place anything you want **under the subject's silhouette** between this and `subject.webm` |
+
+Both encoders share the source W/H/fps and your `--quality` preset, so the layers are pixel-aligned. Encode cost roughly doubles; segmentation cost is unchanged.
+
+<Tip>
+**This is a hole-cut plate, not an inpainted clean plate.** The subject region in `plate.webm` is fully transparent — you have to composite something opaque under it (a graphic, a blurred copy, a different scene) to fill the hole. If you need an actual filled background where the subject was, use a video inpainter (LaMa, ProPainter, RunwayML Inpaint) — `remove-background` is not the right tool for that.
+</Tip>
+
+### Hole-cut vs. clean plate — when does the difference matter?
+
+A **hole-cut plate** keeps the original surroundings and makes the subject region transparent. A **clean plate** fills the subject region with reconstructed background — produced by a separate inpainting model. Display each alone over black:
+
+| | Hole-cut plate (this command) | Clean plate (inpainted) |
+| --- | --- | --- |
+| Subject region | Transparent silhouette | Reconstructed background pixels |
+| What you see alone | A person-shaped hole | An empty room |
+| Cost | One inference pass, one extra ffmpeg encode | A second model (LaMa, ProPainter, E2FGVI) |
+| Tool | `remove-background --background-output` | Outside this CLI |
+
+The line is: **does anything ever need to be visible *through* the subject's silhouette where the subject used to be?**
+
+| Use case | What you need |
+| --- | --- |
+| Text/graphics live *between* the cutout and the plate (the example above) | **Hole-cut** — the graphics fill the hole. |
+| Composite the subject onto an unrelated scene | Neither. Just use `subject.webm`; the plate is irrelevant. |
+| Show "the room without the person" as a real background | **Clean plate** — a hole-cut plate would show a transparent void. |
+| Replace the person with a different subject (re-target) | **Clean plate** — the new subject needs real pixels under it. |
+| VFX rotoscoping / "remove an extra from this take" | **Clean plate** — the canonical inpainting use case. |
+
+If something opaque always covers the silhouette, hole-cut is sufficient and ~1000× cheaper than running an inpainter.
+
+### The two-layer composition pattern
+
+The two-layer pattern is functionally a drop-in for [text-behind-subject](#text-behind-subject-the-recommended-layout) without needing the original `presenter.mp4` in the project — the plate replaces it as the bottom layer:
+
+```html
+<!-- z=1 inverse-alpha plate fills everything except the subject's silhouette -->
+<video src="plate.webm" data-start="0" data-duration="6" data-track-index="0" muted playsinline></video>
+
+<!-- z=2 anything you want occluded by the subject lives here -->
+<h1 style="z-index:2; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);">
+  MAKE IT IN HYPERFRAMES
+</h1>
+
+<!-- z=3 the cutout puts the subject back on top -->
+<div class="cutout-wrap" style="position:absolute;inset:0;z-index:3">
+  <video src="subject.webm" data-start="0" data-duration="6" data-track-index="1" muted playsinline></video>
+</div>
+```
+
+Constraints: the flag requires a video input and `.webm` or `.mov` for both outputs. It's not valid for image inputs (no temporal pairing to do) and won't accept `.png` for the plate.
 
 ## Performance
 
@@ -91,7 +156,7 @@ Real-world numbers from the [matting eval](https://www.heygenverse.com/a/0dd5a43
 | Linux x86 | CPU | ~1100 | ~16 min |
 | macOS Intel | CPU | ~900 | ~13 min |
 
-Matting is offline preprocessing — you run it once per asset and reuse the output. CPU-only is slow but always works; if you reuse the same avatar repeatedly, run it once on a faster machine and check the transparent output into your project.
+Matting is offline preprocessing — you run it once per asset and reuse the output. CPU-only is slow but always works; if you reuse the same subject clip repeatedly, run it once on a faster machine and check the transparent output into your project.
 
 ## Picking a device explicitly
 
@@ -100,13 +165,13 @@ Matting is offline preprocessing — you run it once per asset and reuse the out
 - **Force CPU on a GPU box** when you want to keep the GPU free for other work, or are debugging an EP-specific issue:
 
   ```bash Terminal
-  npx hyperframes remove-background avatar.mp4 -o transparent.webm --device cpu
+  npx hyperframes remove-background subject.mp4 -o transparent.webm --device cpu
   ```
 
 - **Opt into CUDA** by setting `HYPERFRAMES_CUDA=1` and providing a GPU-enabled `onnxruntime-node` build (the bundled build is CPU + CoreML only, to keep the install small for the 99% of users who don't have a GPU):
 
   ```bash Terminal
-  HYPERFRAMES_CUDA=1 npx hyperframes remove-background avatar.mp4 -o transparent.webm --device cuda
+  HYPERFRAMES_CUDA=1 npx hyperframes remove-background subject.mp4 -o transparent.webm --device cuda
   ```
 
 Run `npx hyperframes remove-background --info` to see what providers are detected on your machine and which one `auto` would pick.
@@ -115,7 +180,7 @@ Run `npx hyperframes remove-background --info` to see what providers are detecte
 
 The transparent WebM behaves like any other video element. The two patterns you'll use most:
 
-**Avatar over a background image:**
+**Subject over a background image:**
 
 ```html
 <div style="position: relative; width: 1920px; height: 1080px;">
@@ -131,21 +196,103 @@ The transparent WebM behaves like any other video element. The two patterns you'
 </div>
 ```
 
-**Avatar over a HyperFrames scene:**
+**Subject over a HyperFrames scene:**
 
 ```html
 <!-- scene contents (text, animations, etc.) -->
 <div class="title-card">Welcome</div>
 
-<!-- avatar layered on top -->
-<video src="transparent.webm" autoplay muted loop playsinline class="avatar"></video>
+<!-- subject layered on top -->
+<video src="transparent.webm" autoplay muted loop playsinline class="subject"></video>
 ```
 
-The avatar inherits the composition's frame rate and timeline — it plays through once during the scene's duration, so match the source clip length to the scene length when possible. If the scene is longer than the clip, `loop` handles it.
+The cutout inherits the composition's frame rate and timeline — it plays through once during the scene's duration, so match the source clip length to the scene length when possible. If the scene is longer than the clip, `loop` handles it.
 
 <Tip>
   When rendering a composition that contains a `<video>` element, the renderer reads the source via ffmpeg internally. Transparent WebMs are decoded with the alpha plane preserved.
 </Tip>
+
+## Compositing patterns and pitfalls
+
+The cutout webm is a **re-encoded copy** of the source mp4's RGB — the matter pipeline decodes the source to raw RGB, runs segmentation, and re-encodes to VP9 with alpha. That choice has consequences depending on what you put behind it.
+
+### The three patterns
+
+| Pattern | Behind the cutout | Result |
+|---|---|---|
+| **Cutout over a different scene** *(most common)* | Static image, gradient, animated bg, or unrelated footage | Clean. The cutout is the only source of the subject — no doubling, no edge halo. Use any `--quality`. |
+| **Cutout over its own source mp4** *(text-behind-subject, talking-head with overlays)* | The same mp4 the cutout was generated from | Two RGB sources for the same person. At default `--quality balanced` (crf 18) the doubling is barely visible; at `--quality fast` (crf 30) you'll see a slight color shift / soft edge on the silhouette. Use `--quality best` (crf 12) for hero shots. |
+| **Cutout over different footage of the same subject** | Another take of the same person | Looks like two overlapping people. Avoid — re-shoot or re-cut the source. |
+
+### Text-behind-subject: the recommended layout
+
+Putting a headline *behind* a presenter so their silhouette occludes the text:
+
+```html
+<!-- z=1 base mp4: full lobby + presenter, plays the whole scene -->
+<video
+  id="cf-base"
+  data-start="0" data-duration="6" data-media-start="0" data-track-index="0"
+  src="presenter.mp4"
+  muted playsinline
+></video>
+
+<!-- z=2 headline -->
+<h1 id="cf-headline" style="position:absolute;top:50%;left:50%;
+     transform:translate(-50%,-50%); z-index:2;
+     color:#fff; text-shadow:0 6px 32px rgba(0,0,0,.55);
+     clip-path:inset(0 0 100% 0); font-size:220px; font-weight:900;">
+  MAKE IT IN HYPERFRAMES
+</h1>
+
+<!-- z=3 cutout: same source, alpha around presenter, hidden until the cut.
+     The wrapper carries the opacity, NOT the <video> itself. -->
+<div class="cutout-wrap" style="position:absolute;inset:0;z-index:3;opacity:0">
+  <video
+    id="cf-cutout"
+    data-start="0" data-duration="6" data-media-start="0" data-track-index="1"
+    src="presenter.webm"
+    muted playsinline
+  ></video>
+</div>
+```
+
+```js
+const tl = gsap.timeline({ paused: true });
+const CUT = 3.3;
+
+// Reveal the headline early
+tl.to("#cf-headline", { clipPath: "inset(0 0 0% 0)", duration: 0.6, ease: "expo.out" }, 0.25);
+
+// At the cut, flip the cutout wrapper visible — silhouette punches through the headline
+tl.set(".cutout-wrap", { opacity: 1 }, CUT);
+
+// Sentinel: extend timeline to the composition's full duration so the renderer
+// doesn't bail past the last meaningful tween.
+tl.set({}, {}, 6);
+```
+
+### Two non-obvious rules
+
+**1. Wrap the cutout video in a non-timed `<div>` and animate the wrapper, not the video.**
+
+The framework forces `opacity: 1` on any element with `data-start`/`data-duration` while it's "active" — that's how it controls clip visibility. CSS `opacity: 0` on the video element is silently overwritten by the framework's clip lifecycle, so an opacity tween on the video element won't do anything. Wrap the video in a `<div>` that has no `data-*` attributes; the wrapper is owned entirely by your CSS/GSAP.
+
+**2. Both videos start at `data-start="0"` and decode in sync from t=0.**
+
+It's tempting to "late-mount" the cutout (`data-start="3.3"` to match the cut). Don't — Chrome does a seek + decoder warm-up at mount, which can land one frame off the base mp4 at the cut moment. With both videos mounted from t=0 and the cutout's wrapper opacity-animated, both decoders advance the same way and stay frame-accurate.
+
+### Quality preset and color match
+
+When the cutout is overlaid on its own source mp4, the encoder's CRF directly affects how visible the doubling is at edges:
+
+| `--quality` | CRF | File size (12s @ 1080p) | When to use |
+|---|---|---|---|
+| `fast` | 30 | ~2 MB | Cutout sits over an unrelated background and file size matters |
+| `balanced` *(default)* | 18 | ~6 MB | Recommended for text-behind-subject and any pattern that overlays on the source |
+| `best` | 12 | ~12 MB | Hero shots, masters, or anything you'll re-encode downstream |
+
+The encoder also writes BT.709 + limited-range color metadata so Chrome's YUV→RGB pipeline matches the source mp4's. Without those tags, the cutout would render slightly differently from the underlying mp4 even at lossless quality (visible red/skin shift).
 
 ## What u²-net_human_seg is and isn't good for
 
@@ -166,7 +313,7 @@ If your use case hits one of these, see the alternatives below.
 
 ## Alternatives — when the built-in command isn't the right tool
 
-The CLI ships **one model on purpose** — the one that's MIT-licensed, runs everywhere, and produces production-quality output for HeyGen-style avatar workflows. The list below leads with **free, open-source tools** that pair naturally with HyperFrames. Each entry calls out the actual catch — license, install effort, hardware needs — so you can pick the right one for your situation. Full benchmarks are in the [matting eval](https://www.heygenverse.com/a/0dd5a431-1832-4858-862d-de7fb7d02654).
+The CLI ships **one model on purpose** — the one that's MIT-licensed, runs everywhere, and produces production-quality output for person/portrait video. The list below leads with **free, open-source tools** that pair naturally with HyperFrames. Each entry calls out the actual catch — license, install effort, hardware needs — so you can pick the right one for your situation. Full benchmarks are in the [matting eval](https://www.heygenverse.com/a/0dd5a431-1832-4858-862d-de7fb7d02654).
 
 ### Free, open-source CLIs and libraries
 
@@ -208,7 +355,7 @@ ffmpeg -i frames-%04d.png -c:v libvpx-vp9 \
 
 ### How to choose
 
-- **Avatars / portraits, web playback, MIT-clean** → use the built-in `hyperframes remove-background` (this is what it's tuned for).
+- **Person / portrait video, web playback, MIT-clean** → use the built-in `hyperframes remove-background` (this is what it's tuned for).
 - **Non-human subject** (product, animal, object) → `rembg` with `isnet-general-use`.
 - **Maximum portrait quality, especially hair** → `BiRefNet` via Python.
 - **Long video where edge flicker would be visible**, GPL is OK → `RVM`.
@@ -259,7 +406,7 @@ The decoded `frame0.png` should be RGBA and have non-trivial alpha values.
 The pipeline auto-falls-back to CPU if CoreML fails to bind, with a warning. If you want to skip the CoreML attempt entirely, force CPU:
 
 ```bash Terminal
-npx hyperframes remove-background avatar.mp4 -o transparent.webm --device cpu
+npx hyperframes remove-background subject.mp4 -o transparent.webm --device cpu
 ```
 
 ### The alpha mask has rough or jagged edges

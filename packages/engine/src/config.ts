@@ -32,10 +32,15 @@ export interface EngineConfig {
   chromePath?: string;
   disableGpu: boolean;
   /**
-   * Chrome/WebGL rendering backend. "software" keeps the existing SwiftShader
-   * path for reproducible output; "hardware" lets Chrome use the host GPU.
+   * Chrome/WebGL rendering backend.
+   * - "software": SwiftShader (CPU-only). Always works; ~5-50× slower than GPU.
+   * - "hardware": host GPU via platform-native ANGLE backend (Metal/D3D11/EGL).
+   *   Errors if no usable GPU is reachable from Chrome.
+   * - "auto": probe Chrome for WebGL availability on first launch in this
+   *   process; fall back to software if hardware-mode WebGL is unavailable.
+   *   Cost: one extra Chrome launch (~1-2 s) per process; result cached.
    */
-  browserGpuMode: "software" | "hardware";
+  browserGpuMode: "software" | "hardware" | "auto";
   enableBrowserPool: boolean;
   browserTimeout: number;
   protocolTimeout: number;
@@ -173,7 +178,7 @@ export function resolveConfig(overrides?: Partial<EngineConfig>): EngineConfig {
   };
   const envBrowserGpuMode = (): EngineConfig["browserGpuMode"] => {
     const raw = env("PRODUCER_BROWSER_GPU_MODE");
-    if (raw === "hardware" || raw === "software") return raw;
+    if (raw === "hardware" || raw === "software" || raw === "auto") return raw;
     return DEFAULT_CONFIG.browserGpuMode;
   };
 

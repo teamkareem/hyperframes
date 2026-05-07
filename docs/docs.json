@@ -69,6 +69,7 @@
           {
             "group": "Guides",
             "pages": [
+              "guides/html-in-canvas",
               "guides/website-to-video",
               "guides/claude-design",
               "guides/open-design",
@@ -76,6 +77,7 @@
               "guides/hyperframes-vs-remotion",
               "guides/gsap-animation",
               "guides/rendering",
+              "guides/deploy",
               "guides/remove-background",
               "guides/hdr",
               "guides/performance",
@@ -90,6 +92,18 @@
       {
         "tab": "Catalog",
         "groups": [
+          {
+            "group": "HTML-in-Canvas",
+            "pages": [
+              "catalog/blocks/vfx-iphone-device",
+              "catalog/blocks/vfx-liquid-background",
+              "catalog/blocks/vfx-liquid-glass",
+              "catalog/blocks/vfx-magnetic",
+              "catalog/blocks/vfx-portal",
+              "catalog/blocks/vfx-shatter",
+              "catalog/blocks/vfx-text-cursor"
+            ]
+          },
           {
             "group": "Social Overlays",
             "pages": [
@@ -144,10 +158,11 @@
             "pages": [
               "catalog/blocks/app-showcase",
               "catalog/blocks/apple-money-count",
-              "catalog/blocks/goonvpn-youtube-spot",
+              "catalog/blocks/blue-sweater-intro-video",
               "catalog/blocks/north-korea-locked-down",
               "catalog/blocks/nyc-paris-flight",
-              "catalog/blocks/ui-3d-reveal"
+              "catalog/blocks/ui-3d-reveal",
+              "catalog/blocks/vpn-youtube-spot"
             ]
           },
           {

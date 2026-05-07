@@ -1,4 +1,5 @@
 import type { RuntimeDeterministicAdapter } from "../types";
+import { swallow } from "../diagnostics";
 export { isLottieAnimationLoaded } from "./lottieReadiness";
 
 /**
@@ -71,8 +72,9 @@ export function createLottieAdapter(): RuntimeDeterministicAdapter {
             (window as LottieWindow).__hfLottie = existing;
           }
         }
-      } catch {
+      } catch (err) {
         // ignore discovery failures
+        swallow("runtime.adapters.lottie.site1", err);
       }
     },
 
@@ -107,8 +109,9 @@ export function createLottieAdapter(): RuntimeDeterministicAdapter {
               anim.seek(percentage);
             }
           }
-        } catch {
+        } catch (err) {
           // ignore per-animation failures — keep going for other instances
+          swallow("runtime.adapters.lottie.site2", err);
         }
       }
     },
@@ -124,8 +127,9 @@ export function createLottieAdapter(): RuntimeDeterministicAdapter {
           } else if (isDotLottiePlayer(anim)) {
             anim.pause();
           }
-        } catch {
+        } catch (err) {
           // ignore
+          swallow("runtime.adapters.lottie.site3", err);
         }
       }
     },

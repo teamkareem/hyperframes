@@ -1,4 +1,5 @@
 import type { RuntimeDeterministicAdapter } from "../types";
+import { swallow } from "../diagnostics";
 
 export function createThreeAdapter(): RuntimeDeterministicAdapter {
   let forcedTime: number | null = null;
@@ -13,8 +14,9 @@ export function createThreeAdapter(): RuntimeDeterministicAdapter {
       window.__hfThreeTime = forcedTime;
       try {
         window.dispatchEvent(new CustomEvent("hf-seek", { detail: { time: forcedTime } }));
-      } catch {
+      } catch (err) {
         // ignore custom event failures
+        swallow("runtime.adapters.three.site1", err);
       }
     },
     pause: () => {

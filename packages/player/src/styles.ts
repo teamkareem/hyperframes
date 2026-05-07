@@ -31,6 +31,161 @@ export const PLAYER_STYLES = /* css */ `
     pointer-events: none;
   }
 
+  .hfp-shader-loader {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: grid;
+    place-items: center;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+    background: #030504;
+    color: #f4f7fb;
+    cursor: default;
+    user-select: none;
+    -webkit-user-select: none;
+    transition: opacity 420ms ease-out, visibility 420ms ease-out;
+  }
+
+  .hfp-shader-loader.hfp-visible,
+  .hfp-shader-loader.hfp-hiding {
+    visibility: visible;
+  }
+
+  .hfp-shader-loader.hfp-visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .hfp-shader-loader.hfp-hiding {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .hfp-shader-loader-panel {
+    display: grid;
+    grid-template-rows: 86px 40px 26px 12px 44px;
+    justify-items: center;
+    align-items: center;
+    gap: 8px;
+    width: min(620px, 82%);
+    text-align: center;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .hfp-shader-loader-mark {
+    width: 86px;
+    height: 86px;
+    display: grid;
+    place-items: center;
+    overflow: visible;
+  }
+
+  .hfp-shader-loader-mark svg {
+    display: block;
+    overflow: visible;
+    filter: drop-shadow(0 0 5px rgba(79, 219, 94, 0.16));
+    pointer-events: none;
+  }
+
+  .hfp-shader-loader-title {
+    width: 100%;
+    height: 40px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: 26px;
+    line-height: 40px;
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+
+  .hfp-shader-loader-title-text {
+    color: transparent;
+    background: linear-gradient(
+      90deg,
+      rgba(244, 247, 251, 0.84) 0%,
+      #ffffff 42%,
+      #80efe4 52%,
+      #ffffff 62%,
+      rgba(244, 247, 251, 0.84) 100%
+    );
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    animation: hfp-shader-loader-sheen 1.9s linear infinite;
+  }
+
+  .hfp-shader-loader-detail {
+    width: 100%;
+    height: 26px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: rgba(244, 247, 251, 0.62);
+    font-size: 15px;
+    line-height: 26px;
+    font-weight: 500;
+  }
+
+  .hfp-shader-loader-track {
+    width: min(360px, 100%);
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .hfp-shader-loader-fill {
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #06e3fa, #4fdb5e);
+    transform: scaleX(0);
+    transform-origin: left center;
+    transition: transform 160ms ease;
+  }
+
+  .hfp-shader-loader-progress {
+    width: min(420px, 100%);
+    height: 44px;
+    display: grid;
+    grid-template-rows: repeat(2, 22px);
+    color: rgba(244, 247, 251, 0.48);
+    font: 600 13px/22px "IBM Plex Mono", "SF Mono", "Fira Code", "Courier New", monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .hfp-shader-loader-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 74px;
+    align-items: center;
+    column-gap: 20px;
+    width: 100%;
+    white-space: nowrap;
+  }
+
+  .hfp-shader-loader-label {
+    min-width: 0;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+  }
+
+  .hfp-shader-loader-value {
+    text-align: right;
+  }
+
+  @keyframes hfp-shader-loader-sheen {
+    from {
+      background-position: 140% 0;
+    }
+    to {
+      background-position: -140% 0;
+    }
+  }
+
   /* ── Theming via CSS custom properties ──
    *
    * Override from outside the shadow DOM:
@@ -195,10 +350,77 @@ export const PLAYER_STYLES = /* css */ `
     color: var(--hfp-accent, #fff);
     font-weight: 600;
   }
+
+  .hfp-volume-wrap {
+    position: relative;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 0;
+  }
+
+  .hfp-mute-btn {
+    background: none;
+    border: none;
+    color: var(--hfp-color, #fff);
+    cursor: pointer;
+    padding: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+  }
+
+  .hfp-mute-btn:hover {
+    opacity: 0.8;
+  }
+
+  .hfp-mute-btn svg,
+  .hfp-mute-btn svg * {
+    pointer-events: none;
+  }
+
+  .hfp-volume-slider-wrap {
+    width: 0;
+    overflow: hidden;
+    transition: width 0.2s ease;
+    display: flex;
+    align-items: center;
+  }
+
+  .hfp-volume-wrap:hover .hfp-volume-slider-wrap {
+    width: 64px;
+  }
+
+  .hfp-volume-slider {
+    width: 56px;
+    height: var(--hfp-scrubber-height, 4px);
+    background: var(--hfp-scrubber-bg, rgba(255, 255, 255, 0.3));
+    border-radius: var(--hfp-scrubber-radius, 2px);
+    cursor: pointer;
+    position: relative;
+    margin-left: 4px;
+    margin-right: 4px;
+  }
+
+  .hfp-volume-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    background: var(--hfp-accent, #fff);
+    border-radius: var(--hfp-scrubber-radius, 2px);
+    pointer-events: none;
+  }
 `;
 
 export const PLAY_ICON = `<svg width="24" height="24" viewBox="0 0 18 18" fill="currentColor"><polygon points="4,2 16,9 4,16"/></svg>`;
 export const PAUSE_ICON = `<svg width="24" height="24" viewBox="0 0 18 18" fill="currentColor"><rect x="3" y="2" width="4" height="14"/><rect x="11" y="2" width="4" height="14"/></svg>`;
+export const VOLUME_HIGH_ICON = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/><path d="M14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>`;
+export const VOLUME_LOW_ICON = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>`;
+export const VOLUME_MUTED_ICON = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3z"/><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z" opacity="0.3"/><line x1="18" y1="7" x2="14" y2="17" stroke="currentColor" stroke-width="2"/></svg>`;
 
 /**
  * Process-wide cache for the constructed PLAYER_STYLES sheet. Lazy so the

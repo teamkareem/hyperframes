@@ -24,10 +24,24 @@ interface OrtModule {
   Tensor: typeof Tensor;
 }
 
+export interface SessionResult {
+  /** Subject opaque, background fully transparent. */
+  fg: Buffer;
+  /** Inverse-alpha plate: same RGB, alpha is `255 − mask`. Null unless `withBackground` was true. */
+  bg: Buffer | null;
+}
+
 export interface Session {
-  /** Run inference on one RGB frame, return RGBA bytes (H*W*4). */
-  process(rgb: Buffer, width: number, height: number): Promise<Buffer>;
-  /** ORT EP that was actually selected. */
+  /**
+   * Both `fg` and `bg` (when requested) are session-owned buffers reused on the
+   * next call — drain the encoder's stdin before invoking `process` again.
+   */
+  process(
+    rgb: Buffer,
+    width: number,
+    height: number,
+    withBackground?: boolean,
+  ): Promise<SessionResult>;
   provider: string;
   close(): Promise<void>;
 }
@@ -73,16 +87,15 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
     throw new Error("ONNX session is missing input or output bindings");
   }
 
-  // Pre-allocated per-frame buffers reused across every process() call.
-  // At 1080p this saves ~9 MB of allocations per frame. rgbaBuf is sized
-  // lazily on the first call (we don't know W/H until then).
+  // Reused across calls; sized lazily on first frame. Saves ~9 MB/frame at 1080p.
   const inputData = new Float32Array(3 * INPUT_PLANE);
   const maskBuf = Buffer.allocUnsafe(INPUT_PLANE);
   let rgbaBuf: Buffer | null = null;
+  let rgbaBgBuf: Buffer | null = null;
 
   return {
     provider: providerUsed,
-    async process(rgb, width, height) {
+    async process(rgb, width, height, withBackground = false) {
       const tensor = await preprocess(sharp, ort, rgb, width, height, inputData);
       const outputs = await session.run({ [inputName]: tensor });
       const output = outputs[outputName];
@@ -91,7 +104,21 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
       if (!rgbaBuf || rgbaBuf.length !== expectedBytes) {
         rgbaBuf = Buffer.allocUnsafe(expectedBytes);
       }
-      return await postprocess(sharp, output, rgb, width, height, maskBuf, rgbaBuf);
+      if (withBackground) {
+        if (!rgbaBgBuf || rgbaBgBuf.length !== expectedBytes) {
+          rgbaBgBuf = Buffer.allocUnsafe(expectedBytes);
+        }
+      }
+      return await postprocess(
+        sharp,
+        output,
+        rgb,
+        width,
+        height,
+        maskBuf,
+        rgbaBuf,
+        withBackground ? rgbaBgBuf : null,
+      );
     },
     async close() {
       await session.release();
@@ -141,7 +168,8 @@ async function postprocess(
   height: number,
   maskBuf: Buffer,
   rgbaBuf: Buffer,
-): Promise<Buffer> {
+  rgbaBgBuf: Buffer | null,
+): Promise<SessionResult> {
   const raw = output.data as Float32Array;
 
   let lo = Infinity;
@@ -159,18 +187,63 @@ async function postprocess(
   }
 
   // lanczos3 keeps soft edges; nearest leaves visible jaggies on hair.
+  // Sharp upcasts the single-channel raw input to a 3-channel buffer during
+  // resize, so the output is laid out as RGB-interleaved (R0,G0,B0,R1,G1,B1,...)
+  // even though all three channels carry the same grayscale value. Force the
+  // output back to single channel with toColourspace("b-w") so we can index
+  // it linearly as a mask.
   const fullMask = await sharp(maskBuf, {
     raw: { width: INPUT_SIZE, height: INPUT_SIZE, channels: 1 },
   })
     .resize(width, height, { kernel: "lanczos3", fit: "fill" })
+    .toColourspace("b-w")
     .raw()
     .toBuffer();
 
-  for (let i = 0; i < width * height; i++) {
-    rgbaBuf[i * 4] = rgb[i * 3]!;
-    rgbaBuf[i * 4 + 1] = rgb[i * 3 + 1]!;
-    rgbaBuf[i * 4 + 2] = rgb[i * 3 + 2]!;
-    rgbaBuf[i * 4 + 3] = fullMask[i]!;
+  return applyMask(rgb, fullMask, rgbaBuf, rgbaBgBuf, width * height);
+}
+
+/**
+ * Composite the RGB source frame with the segmentation mask into one or two
+ * RGBA buffers. The contract this PR is built on:
+ *  - `fg`'s alpha is the mask, `bg`'s alpha (when provided) is `255 − mask`,
+ *    so `fg.alpha + bg.alpha === 255` for every pixel.
+ *  - RGB triples are byte-identical between `fg` and `bg`.
+ *  - When `bg` is null, only `fg` is touched.
+ *
+ * Exported for direct unit testing of the invariants above without spinning
+ * up an ONNX session.
+ */
+export function applyMask(
+  rgb: Buffer,
+  mask: Buffer,
+  fg: Buffer,
+  bg: Buffer | null,
+  pixels: number,
+): SessionResult {
+  if (bg) {
+    for (let i = 0; i < pixels; i++) {
+      const r = rgb[i * 3]!;
+      const g = rgb[i * 3 + 1]!;
+      const b = rgb[i * 3 + 2]!;
+      const m = mask[i]!;
+      const o = i * 4;
+      fg[o] = r;
+      fg[o + 1] = g;
+      fg[o + 2] = b;
+      fg[o + 3] = m;
+      bg[o] = r;
+      bg[o + 1] = g;
+      bg[o + 2] = b;
+      bg[o + 3] = 255 - m;
+    }
+    return { fg, bg };
   }
-  return rgbaBuf;
+  for (let i = 0; i < pixels; i++) {
+    fg[i * 4] = rgb[i * 3]!;
+    fg[i * 4 + 1] = rgb[i * 3 + 1]!;
+    fg[i * 4 + 2] = rgb[i * 3 + 2]!;
+    fg[i * 4 + 3] = mask[i]!;
+  }
+  return { fg, bg: null };
 }

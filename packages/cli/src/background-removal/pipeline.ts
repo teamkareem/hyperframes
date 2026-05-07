@@ -20,11 +20,38 @@ import { type Device, type ModelId } from "./manager.js";
 
 export type OutputFormat = "webm" | "mov" | "png";
 
+export const QUALITY_CRF = {
+  fast: 30,
+  balanced: 18,
+  best: 12,
+} as const;
+
+export type Quality = keyof typeof QUALITY_CRF;
+
+export const QUALITIES = Object.keys(QUALITY_CRF) as readonly Quality[];
+
+export const DEFAULT_QUALITY: Quality = "balanced";
+
+export const isQuality = (v: unknown): v is Quality =>
+  typeof v === "string" && (QUALITIES as readonly string[]).includes(v);
+
 export interface RenderOptions {
   inputPath: string;
   outputPath: string;
+  /**
+   * Optional second output: an inverse-alpha background plate (same source
+   * RGB, transparent where the subject was). Only valid for video inputs and
+   * .webm/.mov outputs — not allowed alongside a .png output. The plate's
+   * format is inferred from this path independently of the foreground's.
+   *
+   * NOTE: this is a hole-cut plate, not an inpainted clean plate. Composite
+   * something opaque (graphics, blur, scene) under it to fill the hole.
+   */
+  backgroundOutputPath?: string;
   device?: Device;
   model?: ModelId;
+  /** Encoder CRF preset for `.webm`. See `QUALITY_CRF`. Ignored for `.mov`/`.png`. */
+  quality?: Quality;
   onProgress?: (event: ProgressEvent) => void;
 }
 
@@ -35,6 +62,8 @@ export type ProgressEvent =
 
 export interface RenderResult {
   outputPath: string;
+  /** Present only when `backgroundOutputPath` was set. */
+  backgroundOutputPath?: string;
   framesProcessed: number;
   durationSeconds: number;
   avgMsPerFrame: number;
@@ -100,6 +129,7 @@ export function buildEncoderArgs(
   height: number,
   fps: number,
   outputPath: string,
+  quality: Quality = DEFAULT_QUALITY,
 ): string[] {
   const base = [
     "-y",
@@ -123,7 +153,7 @@ export function buildEncoderArgs(
       "-b:v",
       "0",
       "-crf",
-      "30",
+      String(QUALITY_CRF[quality]),
       "-deadline",
       "good",
       "-row-mt",
@@ -132,6 +162,19 @@ export function buildEncoderArgs(
       "0",
       "-pix_fmt",
       "yuva420p",
+      // Tag the output as BT.709 limited range so browsers use the same
+      // YUV→RGB matrix the source video was encoded with. Without these tags
+      // ffmpeg's default RGB→YUV conversion is BT.601, which causes a visible
+      // color shift (red/skin tones in particular) when the matted overlay is
+      // composited over the original mp4.
+      "-colorspace",
+      "bt709",
+      "-color_primaries",
+      "bt709",
+      "-color_trc",
+      "bt709",
+      "-color_range",
+      "tv",
       "-metadata:s:v:0",
       "alpha_mode=1",
       "-an",
@@ -172,17 +215,27 @@ async function* readFrames(
   }
 }
 
-export async function render(options: RenderOptions): Promise<RenderResult> {
-  if (!hasFFmpeg() || !hasFFprobe()) {
-    throw new Error("ffmpeg and ffprobe are required. Install: brew install ffmpeg");
-  }
+export interface RenderTargets {
+  format: OutputFormat;
+  inputKind: "video" | "image";
+  bgFormat: OutputFormat | undefined;
+}
 
-  const format = inferOutputFormat(options.outputPath);
-  const inputKind = inferInputKind(options.inputPath);
+/**
+ * Resolve and validate the input/output combination before any I/O. Pure;
+ * exported so unit tests can pin the error messages without spawning ffmpeg.
+ */
+export function resolveRenderTargets(
+  inputPath: string,
+  outputPath: string,
+  backgroundOutputPath?: string,
+): RenderTargets {
+  const format = inferOutputFormat(outputPath);
+  const inputKind = inferInputKind(inputPath);
 
   if (inputKind === "image" && format !== "png") {
     throw new Error(
-      `Image input requires a .png output (got ${extname(options.outputPath)}). Use a video input for .webm/.mov.`,
+      `Image input requires a .png output (got ${extname(outputPath)}). Use a video input for .webm/.mov.`,
     );
   }
   if (inputKind === "video" && format === "png") {
@@ -190,6 +243,35 @@ export async function render(options: RenderOptions): Promise<RenderResult> {
       `Video input requires a .webm or .mov output (got .png). Use an image input for .png.`,
     );
   }
+
+  let bgFormat: OutputFormat | undefined;
+  if (backgroundOutputPath) {
+    if (inputKind === "image") {
+      throw new Error(
+        "--background-output is not supported for image inputs. Use a video input (mp4/mov/webm) to produce both a cutout and a background plate.",
+      );
+    }
+    bgFormat = inferOutputFormat(backgroundOutputPath);
+    if (bgFormat === "png") {
+      throw new Error(
+        "--background-output must be .webm or .mov; .png is only valid for single-image inputs.",
+      );
+    }
+  }
+
+  return { format, inputKind, bgFormat };
+}
+
+export async function render(options: RenderOptions): Promise<RenderResult> {
+  if (!hasFFmpeg() || !hasFFprobe()) {
+    throw new Error("ffmpeg and ffprobe are required. Install: brew install ffmpeg");
+  }
+
+  const { format, bgFormat } = resolveRenderTargets(
+    options.inputPath,
+    options.outputPath,
+    options.backgroundOutputPath,
+  );
 
   const media = await probeMedia(options.inputPath);
 
@@ -209,12 +291,13 @@ export async function render(options: RenderOptions): Promise<RenderResult> {
 
   try {
     const start = Date.now();
-    const framesProcessed = await runPipeline(options, session, media, format);
+    const framesProcessed = await runPipeline(options, session, media, format, bgFormat);
     const durationSeconds = (Date.now() - start) / 1000;
     const avgMsPerFrame = framesProcessed ? (durationSeconds * 1000) / framesProcessed : 0;
 
     return {
       outputPath: options.outputPath,
+      backgroundOutputPath: options.backgroundOutputPath,
       framesProcessed,
       durationSeconds,
       avgMsPerFrame,
@@ -228,50 +311,77 @@ export async function render(options: RenderOptions): Promise<RenderResult> {
 
 const RECENT_WINDOW = 30;
 
+interface FfmpegProc {
+  proc: ReturnType<typeof spawn>;
+  exit: Promise<void>;
+  /** Tail of stderr, captured for inclusion in error messages. */
+  getStderr: () => string;
+}
+
+type StdioFd = "ignore" | "pipe";
+type StdioTuple = [StdioFd, StdioFd, StdioFd];
+
+function spawnFfmpeg(args: string[], label: string, stdio: StdioTuple): FfmpegProc {
+  const proc = spawn("ffmpeg", args, { stdio });
+  let stderrBuf = "";
+  proc.stderr?.on("data", (d: Buffer) => {
+    stderrBuf += d.toString();
+  });
+  // If the encoder dies mid-render, the next .write() to its stdin emits an
+  // 'error' event on the writable. Without a listener, Node treats it as
+  // unhandled and crashes the CLI before waitForExit's reject path can
+  // surface the real cause (encoder stderr tail). Swallowing here is safe —
+  // the process exit is the source of truth.
+  proc.stdin?.on("error", () => {});
+  const exit = waitForExit(proc, label, () => stderrBuf);
+  return { proc, exit, getStderr: () => stderrBuf };
+}
+
 async function runPipeline(
   options: RenderOptions,
   session: Session,
   media: MediaInfo,
   format: OutputFormat,
+  bgFormat: OutputFormat | undefined,
 ): Promise<number> {
-  const { inputPath, outputPath } = options;
+  const { inputPath, outputPath, backgroundOutputPath } = options;
   const { width, height, fps, frameCount } = media;
   const frameBytes = width * height * 3;
+  const quality = options.quality ?? DEFAULT_QUALITY;
 
-  const decoder = spawn(
-    "ffmpeg",
+  const decoder = spawnFfmpeg(
     ["-loglevel", "error", "-i", inputPath, "-f", "rawvideo", "-pix_fmt", "rgb24", "-an", "-"],
-    { stdio: ["ignore", "pipe", "pipe"] },
+    "ffmpeg decoder",
+    ["ignore", "pipe", "pipe"],
   );
 
-  let decoderStderr = "";
-  decoder.stderr?.on("data", (d: Buffer) => {
-    decoderStderr += d.toString();
-  });
-  const decoderExit = waitForExit(decoder, "ffmpeg decoder", () => decoderStderr);
+  const fg = spawnFfmpeg(
+    buildEncoderArgs(format, width, height, fps || 30, outputPath, quality),
+    "ffmpeg encoder",
+    ["pipe", "ignore", "pipe"],
+  );
 
-  const encoder = spawn("ffmpeg", buildEncoderArgs(format, width, height, fps || 30, outputPath), {
-    stdio: ["pipe", "ignore", "pipe"],
-  });
-  let encoderStderr = "";
-  encoder.stderr?.on("data", (d: Buffer) => {
-    encoderStderr += d.toString();
-  });
-  const encoderExit = waitForExit(encoder, "ffmpeg encoder", () => encoderStderr);
+  const bg =
+    backgroundOutputPath && bgFormat
+      ? spawnFfmpeg(
+          buildEncoderArgs(bgFormat, width, height, fps || 30, backgroundOutputPath, quality),
+          "ffmpeg background encoder",
+          ["pipe", "ignore", "pipe"],
+        )
+      : null;
 
   let processed = 0;
   const total = frameCount;
 
-  // Running average over the last RECENT_WINDOW frames.
   const recentMs = new Array<number>(RECENT_WINDOW).fill(0);
   let recentSum = 0;
   let recentSlot = 0;
   let recentCount = 0;
 
   try {
-    for await (const rgb of readFrames(decoder.stdout!, frameBytes)) {
+    for await (const rgb of readFrames(decoder.proc.stdout!, frameBytes)) {
       const t0 = Date.now();
-      const rgba = await session.process(rgb, width, height);
+      const result = await session.process(rgb, width, height, bg !== null);
       const elapsed = Date.now() - t0;
 
       recentSum += elapsed - recentMs[recentSlot]!;
@@ -279,8 +389,31 @@ async function runPipeline(
       recentSlot = (recentSlot + 1) % RECENT_WINDOW;
       if (recentCount < RECENT_WINDOW) recentCount++;
 
-      if (!encoder.stdin!.write(rgba)) {
-        await new Promise<void>((resolve) => encoder.stdin!.once("drain", () => resolve()));
+      // Issue both writes before any await so a slow encoder doesn't block
+      // the other. Drain anything that returned false before the next
+      // session.process() — its output buffers are reused per frame.
+      //
+      // Subtlety: write() returning true means "highWaterMark not exceeded,"
+      // NOT "libuv has flushed the chunk." The buffer reference is held by
+      // libuv until the underlying syscall completes. Reusing the session's
+      // output buffer is safe because the next session.process() call takes
+      // ~10–50ms (ORT inference) — plenty of event-loop turns for libuv to
+      // drain. If that ever stops being true, we'd need to copy here.
+      const fgWroteFully = fg.proc.stdin!.write(result.fg);
+      const bgWroteFully = bg && result.bg ? bg.proc.stdin!.write(result.bg) : true;
+      if (!fgWroteFully || !bgWroteFully) {
+        const drains: Promise<void>[] = [];
+        if (!fgWroteFully) {
+          drains.push(
+            new Promise<void>((resolve) => fg.proc.stdin!.once("drain", () => resolve())),
+          );
+        }
+        if (!bgWroteFully && bg) {
+          drains.push(
+            new Promise<void>((resolve) => bg.proc.stdin!.once("drain", () => resolve())),
+          );
+        }
+        await Promise.all(drains);
       }
 
       processed++;
@@ -292,17 +425,21 @@ async function runPipeline(
       });
     }
   } catch (err) {
-    decoder.kill("SIGKILL");
-    encoder.kill("SIGKILL");
+    decoder.proc.kill("SIGKILL");
+    fg.proc.kill("SIGKILL");
+    bg?.proc.kill("SIGKILL");
     throw err;
   }
 
-  encoder.stdin!.end();
-  await Promise.all([decoderExit, encoderExit]);
+  fg.proc.stdin!.end();
+  bg?.proc.stdin!.end();
+  const exits: Promise<void>[] = [decoder.exit, fg.exit];
+  if (bg) exits.push(bg.exit);
+  await Promise.all(exits);
 
   if (processed === 0) {
     throw new Error(
-      `No frames produced from ${inputPath}. Decoder stderr:\n${decoderStderr.slice(-400)}`,
+      `No frames produced from ${inputPath}. Decoder stderr:\n${decoder.getStderr().slice(-400)}`,
     );
   }
 

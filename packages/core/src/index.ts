@@ -38,6 +38,7 @@ export {
   CANVAS_DIMENSIONS,
   TIMELINE_COLORS,
   DEFAULT_DURATIONS,
+  COMPOSITION_VARIABLE_TYPES,
   isTextElement,
   isMediaElement,
   isCompositionElement,
@@ -168,6 +169,13 @@ export type { FitTextOptions, FitTextResult } from "./text/index.js";
 
 // Runtime helpers (composition-side)
 export { getVariables } from "./runtime/getVariables.js";
+
+// Variable validation (CLI / tooling-side)
+export {
+  validateVariables,
+  formatVariableValidationIssue,
+  type VariableValidationIssue,
+} from "./runtime/validateVariables.js";
 
 // Registry
 export type {

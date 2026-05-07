@@ -129,6 +129,10 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
     ```bash
     npx hyperframes render --output output.mp4
     ```
+    Render a specific composition instead of `index.html`:
+    ```bash
+    npx hyperframes render -c compositions/intro.html -o intro.mp4
+    ```
     For deterministic output, add `--docker`:
     ```bash
     npx hyperframes render --docker --output output.mp4
@@ -356,6 +360,10 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
     # Single image → transparent PNG
     npx hyperframes remove-background portrait.jpg -o cutout.png
 
+    # Layer separation: cutout AND inverse-alpha background plate in one pass
+    npx hyperframes remove-background avatar.mp4 \
+      -o subject.webm --background-output plate.webm
+
     # Force CPU on a machine that has CoreML or CUDA
     npx hyperframes remove-background avatar.mp4 -o transparent.webm --device cpu
 
@@ -366,7 +374,9 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
     | Flag | Description |
     |------|-------------|
     | `--output, -o` | Output path. Format inferred from extension: `.webm` (default), `.mov`, `.png` |
+    | `--background-output, -b` | Optional second output: inverse-alpha background plate (subject region transparent, surroundings opaque). Same source RGB, complementary mask. Must be `.webm` or `.mov`. Hole-cut, not inpainted — composite something underneath to fill the hole. |
     | `--device` | Execution provider: `auto` (default), `cpu`, `coreml`, `cuda` |
+    | `--quality` | WebM encoder preset: `fast` (crf 30, smallest), `balanced` (crf 18, default), `best` (crf 12, near-lossless). Higher quality keeps the cutout's RGB closer to the source mp4 — important when overlaying the cutout on its own source for text-behind-subject effects. Applies to both `--output` and `--background-output`. Ignored for `.mov` / `.png`. |
     | `--info` | Print detected execution providers and exit (no render) |
     | `--json` | Output result as JSON |
 
@@ -594,7 +604,7 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
     | Flag | Values | Default | Description |
     |------|--------|---------|-------------|
     | `--output` | path | `renders/<name>.mp4` | Output file path |
-    | `--format` | mp4, webm, mov | mp4 | Output format (WebM/MOV render with transparency) |
+    | `--format` | mp4, webm, mov, png-sequence | mp4 | Output format (WebM/MOV render with transparency; png-sequence writes a directory of RGBA PNGs) |
     | `--fps` | 24, 30, 60 | 30 | Frames per second |
     | `--quality` | draft, standard, high | standard | Encoding quality preset (drives CRF/bitrate) |
     | `--crf` | 0-51 | — | Override encoder CRF (lower = higher quality). Mutually exclusive with `--video-bitrate` |
@@ -608,6 +618,7 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
     | `--quiet` | — | off | Suppress verbose output |
     | `--variables` | JSON object | — | Variable overrides merged over `data-composition-variables` defaults. Read via `window.__hyperframes.getVariables()` |
     | `--variables-file` | path | — | Path to a JSON file with variable overrides (alternative to `--variables`) |
+    | `--strict-variables` | — | off | Fail render if any `--variables` key is undeclared or has a wrong type vs the composition's `data-composition-variables`. Without this flag, mismatches print as warnings and the render continues. |
 
     CRF and target bitrate default to the `--quality` preset. Use `--crf` or `--video-bitrate` for fine-grained overrides; `RenderConfig.crf` and `RenderConfig.videoBitrate` accept the same overrides programmatically.
 
@@ -705,7 +716,19 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
       ◇  All checks passed
     ```
 
+    | Flag | Description |
+    |------|-------------|
+    | `--json` | Output as JSON (includes `_meta` envelope) |
+
     Verifies CLI version, Node.js, FFmpeg, FFprobe, Chrome, and Docker availability. If a newer CLI version is available, the version row shows an upgrade hint.
+
+    **CI gating.** `hyperframes doctor --json` always exits 0 on successful execution — the command succeeded if it produced valid output. Whether the environment is healthy is carried in the `ok` field of the payload, so a new CLI release (which flips `Version.ok` to `false`) never breaks your pipeline. Pipe through `jq` to gate on the payload instead:
+
+    ```bash
+    hyperframes doctor --json | jq -e '.ok' > /dev/null || handle_failure
+    ```
+
+    Paths in `detail` and `hint` are redacted in JSON mode — the user's home directory is replaced with the literal `$HOME` so output is safe to paste into bug reports and agent contexts.
 
     ### `info`
 

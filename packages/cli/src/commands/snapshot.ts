@@ -97,20 +97,9 @@ async function captureSnapshots(
 
   const numFrames = opts.frames ?? 5;
 
-  // 1. Bundle
-  let html = await bundleToSingleHtml(projectDir);
-
-  // Inject local runtime if available.
-  // Uses the same multi-strategy resolver as the studio preview server
-  // (runtimeSource.ts) so snapshot works in dev (tsx), built CLI, and npx.
-  const { loadRuntimeSource } = await import("../server/runtimeSource.js");
-  const runtimeSource = await loadRuntimeSource();
-  if (runtimeSource) {
-    html = html.replace(
-      /<script[^>]*data-hyperframes-preview-runtime[^>]*src="[^"]*"[^>]*><\/script>/,
-      () => `<script data-hyperframes-preview-runtime="1">${runtimeSource}</script>`,
-    );
-  }
+  // 1. Bundle. `bundleToSingleHtml` now inlines the runtime IIFE by default,
+  // so the previous post-bundle runtime substitution is no longer needed.
+  const html = await bundleToSingleHtml(projectDir);
 
   const server = await serveStaticProjectHtml(projectDir, html);
 

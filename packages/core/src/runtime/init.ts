@@ -16,6 +16,7 @@ import { loadExternalCompositions, loadInlineTemplateCompositions } from "./comp
 import { applyCaptionOverrides } from "./captionOverrides";
 import type { RuntimeDeterministicAdapter, RuntimeJson, RuntimeTimelineLike } from "./types";
 import type { PlayerAPI } from "../core.types";
+import { swallow } from "./diagnostics";
 
 const AUTHORED_DURATION_ATTR = "data-hf-authored-duration";
 const AUTHORED_END_ATTR = "data-hf-authored-end";
@@ -33,8 +34,9 @@ export function initSandboxRuntimeModular(): void {
   if (typeof runtimeWindow.__hfRuntimeTeardown === "function") {
     try {
       runtimeWindow.__hfRuntimeTeardown();
-    } catch {
+    } catch (err) {
       // keep runtime resilient across reinits
+      swallow("runtime.init.site1", err);
     }
   }
   // Normalize html/body so browser defaults (8px margin, white background) never
@@ -583,8 +585,9 @@ export function initSandboxRuntimeModular(): void {
       if (existingRootTimeline) {
         try {
           fallbackTimeline.add(existingRootTimeline, 0);
-        } catch {
+        } catch (err) {
           // keep fallback resilient if root add fails
+          swallow("runtime.init.site2", err);
         }
       }
       const withTween = fallbackTimeline as RuntimeTimelineLike & {
@@ -593,8 +596,9 @@ export function initSandboxRuntimeModular(): void {
       if (typeof withTween.to === "function") {
         try {
           withTween.to({}, { duration: durationSeconds });
-        } catch {
+        } catch (err) {
           // no-op; if tween creation fails, caller will discard by unusable duration
+          swallow("runtime.init.site3", err);
         }
       }
       return fallbackTimeline;
@@ -622,8 +626,9 @@ export function initSandboxRuntimeModular(): void {
             const startSec = resolveCompositionStartSeconds(candidate.compositionId);
             rootTimeline.add(candidate.timeline, startSec);
             addedIds.push(candidate.compositionId);
-          } catch {
+          } catch (err) {
             // ignore broken child add attempts
+            swallow("runtime.init.site4", err);
           }
         }
         return addedIds;
@@ -687,8 +692,9 @@ export function initSandboxRuntimeModular(): void {
         if (typeof timelineWithPaused.paused !== "function") continue;
         try {
           timelineWithPaused.paused(false);
-        } catch {
+        } catch (err) {
           // keep runtime resilient against timeline API quirks
+          swallow("runtime.init.site5", err);
         }
       }
     };
@@ -828,8 +834,9 @@ export function initSandboxRuntimeModular(): void {
               // Placing a zero-duration tween at the floor extends
               // timeline.duration() to exactly that point.
               tlWithTo.to({}, { duration: 0 }, rootDurationFloorSeconds);
-            } catch {
+            } catch (err) {
               // keep runtime resilient
+              swallow("runtime.init.site6", err);
             }
           }
           const newDur = getTimelineDurationSeconds(rootTimeline);
@@ -1144,8 +1151,9 @@ export function initSandboxRuntimeModular(): void {
       if (wasPlaying) {
         state.capturedTimeline.play();
       }
-    } catch {
+    } catch (err) {
       // keep runtime resilient even if a timeline implementation throws
+      swallow("runtime.init.site7", err);
     }
     postRuntimeMessage({
       source: "hf-preview",
@@ -1296,6 +1304,7 @@ export function initSandboxRuntimeModular(): void {
       playbackRate: state.playbackRate,
       outputMuted: state.mediaOutputMuted,
       userMuted: state.bridgeMuted,
+      userVolume: state.bridgeVolume,
       onAutoplayBlocked: () => {
         if (state.mediaAutoplayBlockedPosted) return;
         state.mediaAutoplayBlockedPosted = true;
@@ -1409,14 +1418,16 @@ export function initSandboxRuntimeModular(): void {
         if (method === "discover") adapter.discover();
         if (method === "pause") adapter.pause();
         if (method === "play" && adapter.play) adapter.play();
-      } catch {
+      } catch (err) {
         // keep runtime resilient against adapter-specific failures
+        swallow("runtime.init.site8", err);
       }
       if (method === "discover") {
         try {
           adapter.seek({ time: timeSeconds });
-        } catch {
+        } catch (err) {
           // ignore seek bootstrap failures
+          swallow("runtime.init.site9", err);
         }
       }
     }
@@ -1478,8 +1489,9 @@ export function initSandboxRuntimeModular(): void {
       if (!(el instanceof HTMLMediaElement)) continue;
       try {
         el.playbackRate = state.playbackRate;
-      } catch {
+      } catch (err) {
         // ignore unsupported values
+        swallow("runtime.init.site10", err);
       }
     }
   };
@@ -1508,8 +1520,9 @@ export function initSandboxRuntimeModular(): void {
       for (const adapter of state.deterministicAdapters) {
         try {
           adapter.seek({ time: Number(timeSeconds) || 0 });
-        } catch {
+        } catch (err) {
           // ignore adapter failure
+          swallow("runtime.init.site11", err);
         }
       }
     },
@@ -1553,6 +1566,16 @@ export function initSandboxRuntimeModular(): void {
       for (const el of mediaEls) {
         if (!(el instanceof HTMLMediaElement)) continue;
         el.muted = effective;
+      }
+    },
+    onSetVolume: (volume) => {
+      state.bridgeVolume = volume;
+      const mediaEls = document.querySelectorAll("video, audio");
+      for (const el of mediaEls) {
+        if (!(el instanceof HTMLMediaElement)) continue;
+        const parsed = parseFloat(el.dataset.volume ?? "");
+        const clipVolume = Number.isFinite(parsed) ? parsed : 1;
+        el.volume = clipVolume * volume;
       }
     },
     onSetMediaOutputMuted: (muted) => {
@@ -1728,31 +1751,35 @@ export function initSandboxRuntimeModular(): void {
       if (!adapter || typeof adapter.revert !== "function") continue;
       try {
         adapter.revert();
-      } catch {
+      } catch (err) {
         // keep runtime resilient against adapter cleanup failures
+        swallow("runtime.init.site12", err);
       }
     }
     state.deterministicAdapters = [];
     for (const cleanup of runtimeCleanupCallbacks.splice(0)) {
       try {
         cleanup();
-      } catch {
+      } catch (err) {
         // ignore cleanup failures
+        swallow("runtime.init.site13", err);
       }
     }
     for (const styleEl of state.injectedCompStyles) {
       try {
         styleEl.remove();
-      } catch {
+      } catch (err) {
         // ignore cleanup failures
+        swallow("runtime.init.site14", err);
       }
     }
     state.injectedCompStyles = [];
     for (const scriptEl of state.injectedCompScripts) {
       try {
         scriptEl.remove();
-      } catch {
+      } catch (err) {
         // ignore cleanup failures
+        swallow("runtime.init.site15", err);
       }
     }
     state.injectedCompScripts = [];

@@ -14,6 +14,7 @@ import { loadRuntimeSource } from "./runtimeSource.js";
 import { VERSION as version } from "../version.js";
 import {
   createStudioApi,
+  createProjectSignature,
   getMimeType,
   type StudioApiAdapter,
   type ResolvedProject,
@@ -144,6 +145,10 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
   // ── CLI adapter for the shared studio API ──────────────────────────────
 
   const project: ResolvedProject = { id: projectId, dir: projectDir, title: projectId };
+  let cachedProjectSignature: string | null = null;
+  watcher.addListener(() => {
+    cachedProjectSignature = null;
+  });
 
   const adapter: StudioApiAdapter = {
     listProjects: () => [project],
@@ -153,8 +158,11 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     async bundle(dir: string): Promise<string | null> {
       try {
         const { bundleToSingleHtml } = await import("@hyperframes/core/compiler");
-        let html = await bundleToSingleHtml(dir);
-        // Fix empty runtime src from bundler — point to the local runtime endpoint
+        // Studio dev server: ask the bundler for an empty `src=""` placeholder so
+        // we can point it at our hot-reloadable local runtime endpoint. Inlining
+        // ~150 KB of runtime body on every preview render would defeat browser
+        // caching across composition edits.
+        let html = await bundleToSingleHtml(dir, { runtime: "placeholder" });
         html = html.replace(
           'data-hyperframes-preview-runtime="1" src=""',
           'data-hyperframes-preview-runtime="1" src="/api/runtime.js"',
@@ -164,6 +172,12 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
         console.error("[studio] Bundle failed:", err);
         return null;
       }
+    },
+
+    getProjectSignature(dir: string): string {
+      if (resolve(dir) !== resolve(projectDir)) return createProjectSignature(dir);
+      cachedProjectSignature ??= createProjectSignature(projectDir);
+      return cachedProjectSignature;
     },
 
     async lint(html: string, opts?: { filePath?: string }) {
@@ -409,7 +423,7 @@ export function createStudioServer(options: StudioServerOptions): StudioServer {
     <main>
       <h1>Studio bundle missing</h1>
       <p>The preview server started, but this CLI build does not contain the Studio assets.</p>
-      <code>pnpm run build</code>
+      <code>bun run build</code>
     </main>
   </body>
 </html>`,

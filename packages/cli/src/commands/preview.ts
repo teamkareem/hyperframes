@@ -115,7 +115,7 @@ export default defineCommand({
 });
 
 /**
- * Dev mode: spawn pnpm studio from the monorepo (existing behavior).
+ * Dev mode: spawn the studio dev server from the monorepo.
  */
 async function runDevMode(dir: string, projectName?: string): Promise<void> {
   // Find monorepo root by navigating from packages/cli/src/commands/
@@ -159,7 +159,7 @@ async function runDevMode(dir: string, projectName?: string): Promise<void> {
 
   // Run the new consolidated studio (single Vite dev server with API plugin)
   const studioPkgDir = join(repoRoot, "packages", "studio");
-  const child = spawn("pnpm", ["exec", "vite"], {
+  const child = spawn("bun", ["run", "dev"], {
     cwd: studioPkgDir,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -335,7 +335,7 @@ async function runEmbeddedMode(
       console.error(`  ${c.dim("-")} ${checkedPath}`);
     }
     console.error();
-    console.error(`  ${c.dim("Rebuild the CLI package with")} ${c.accent("pnpm run build")}`);
+    console.error(`  ${c.dim("Rebuild the CLI package with")} ${c.accent("bun run build")}`);
     console.error();
     process.exitCode = 1;
     return;

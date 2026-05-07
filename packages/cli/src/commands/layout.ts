@@ -1,6 +1,6 @@
 import { defineCommand } from "citty";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Example } from "./_examples.js";
 import { c } from "../ui/colors.js";
@@ -107,27 +107,10 @@ async function seekTo(page: import("puppeteer-core").Page, time: number): Promis
 }
 
 async function bundleProjectHtml(projectDir: string): Promise<string> {
+  // `bundleToSingleHtml` now inlines the runtime IIFE by default, so the
+  // previous post-bundle runtime substitution is no longer needed.
   const { bundleToSingleHtml } = await import("@hyperframes/core/compiler");
-  let html = await bundleToSingleHtml(projectDir);
-
-  const runtimePath = resolve(
-    __dirname,
-    "..",
-    "..",
-    "..",
-    "core",
-    "dist",
-    "hyperframe.runtime.iife.js",
-  );
-  if (existsSync(runtimePath)) {
-    const runtimeSource = readFileSync(runtimePath, "utf-8");
-    html = html.replace(
-      /<script[^>]*data-hyperframes-preview-runtime[^>]*src="[^"]*"[^>]*><\/script>/,
-      () => `<script data-hyperframes-preview-runtime="1">${runtimeSource}</script>`,
-    );
-  }
-
-  return html;
+  return bundleToSingleHtml(projectDir);
 }
 
 async function alignViewportToComposition(

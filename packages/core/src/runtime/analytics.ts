@@ -1,3 +1,4 @@
+import { swallow } from "./diagnostics";
 /**
  * Runtime analytics & performance telemetry — vendor-agnostic event emission.
  *
@@ -75,8 +76,9 @@ export function emitAnalyticsEvent(
       event,
       properties: properties ?? {},
     });
-  } catch {
+  } catch (err) {
     // Never let analytics failures affect the runtime
+    swallow("runtime.analytics.site1", err);
   }
 }
 
@@ -107,8 +109,9 @@ export function emitPerformanceMetric(
     if (typeof performance !== "undefined" && typeof performance.mark === "function") {
       performance.mark(name, { detail: { value, tags: tags ?? {} } });
     }
-  } catch {
+  } catch (err) {
     // performance API unavailable or rejected — keep going
+    swallow("runtime.analytics.site2", err);
   }
 
   if (!_postMessage) return;
@@ -120,7 +123,8 @@ export function emitPerformanceMetric(
       value,
       tags: tags ?? {},
     });
-  } catch {
+  } catch (err) {
     // Never let telemetry failures affect the runtime
+    swallow("runtime.analytics.site3", err);
   }
 }

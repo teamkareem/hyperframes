@@ -136,6 +136,119 @@ async function probeBeginFrameSupport(browser: Browser): Promise<boolean> {
   }
 }
 
+/**
+ * Cached *in-flight or resolved* probe Promise for `resolveBrowserGpuMode("auto", ...)`.
+ *
+ * Caching the Promise (rather than the resolved value) deduplicates concurrent
+ * callers — the parallel coordinator runs N workers via `Promise.all`, so a
+ * `--workers 4` render against a no-GPU host would otherwise fire 4
+ * simultaneous probe Chromes. The first call assigns the Promise and every
+ * other concurrent caller awaits the same one, paying the ~240 ms probe cost
+ * exactly once per process lifetime.
+ *
+ * Exported for tests; production callers go through `resolveBrowserGpuMode`.
+ */
+export let _autoBrowserGpuModeCache: Promise<"software" | "hardware"> | undefined;
+
+/** Test-only: reset the cached probe result. */
+export function _resetAutoBrowserGpuModeCacheForTests(): void {
+  _autoBrowserGpuModeCache = undefined;
+}
+
+/**
+ * Resolve `browserGpuMode` to a concrete `"software" | "hardware"` answer.
+ *
+ * For `"software"` / `"hardware"` this is a pure pass-through. For `"auto"`
+ * it launches a tiny Chrome with the platform's hardware GPU args, runs a
+ * one-shot WebGL availability probe, and falls back to `"software"` if
+ * hardware-mode WebGL is unavailable. The Promise is cached for the process
+ * lifetime, so concurrent callers (parallel workers) share the same probe.
+ *
+ * Any failure (Chrome launch error, navigation timeout, missing canvas API,
+ * etc.) is treated as a `"software"` fallback. The render path with
+ * SwiftShader always works, so a misclassification toward software is the
+ * safe failure mode; misclassifying toward hardware would error on the real
+ * render.
+ */
+export function resolveBrowserGpuMode(
+  mode: EngineConfig["browserGpuMode"],
+  options: {
+    chromePath?: string;
+    browserTimeout?: number;
+    platform?: NodeJS.Platform;
+  } = {},
+): Promise<"software" | "hardware"> {
+  if (mode !== "auto") return Promise.resolve(mode);
+  if (_autoBrowserGpuModeCache) return _autoBrowserGpuModeCache;
+
+  _autoBrowserGpuModeCache = (async () => {
+    const platform = options.platform ?? process.platform;
+    const browserTimeout = options.browserTimeout ?? DEFAULT_CONFIG.browserTimeout;
+    const executablePath = options.chromePath ?? resolveHeadlessShellPath({});
+
+    const probeArgs = [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--enable-webgl",
+      "--ignore-gpu-blocklist",
+      ...getBrowserGpuArgs("hardware", platform),
+    ];
+
+    const ppt = await getPuppeteer().catch(() => null);
+    if (!ppt) {
+      logResolvedBrowserGpuMode("software", "puppeteer unavailable");
+      return "software" as const;
+    }
+
+    let probeBrowser: Browser | undefined;
+    try {
+      probeBrowser = await ppt.launch({
+        headless: true,
+        args: probeArgs,
+        defaultViewport: { width: 64, height: 64 },
+        executablePath,
+        timeout: browserTimeout,
+      });
+      const page = await probeBrowser.newPage();
+      const hasWebGL = await page.evaluate(() => {
+        try {
+          const c = document.createElement("canvas");
+          const gl =
+            c.getContext("webgl") ||
+            (c.getContext("experimental-webgl") as RenderingContext | null);
+          return gl !== null;
+        } catch {
+          return false;
+        }
+      });
+      const resolved = hasWebGL ? ("hardware" as const) : ("software" as const);
+      logResolvedBrowserGpuMode(resolved, hasWebGL ? "WebGL probe succeeded" : "WebGL unavailable");
+      return resolved;
+    } catch (err) {
+      logResolvedBrowserGpuMode(
+        "software",
+        `probe failed (${err instanceof Error ? err.message : String(err)})`,
+      );
+      return "software" as const;
+    } finally {
+      await probeBrowser?.close().catch(() => {});
+    }
+  })();
+
+  return _autoBrowserGpuModeCache;
+}
+
+/**
+ * Single observability surface for the auto-detect outcome. Logged exactly
+ * once per process (the probe runs once); without this line, a regression
+ * to "always software even with a GPU present" would be invisible in
+ * production. Goes to stderr to stay out of stdout pipelines.
+ */
+function logResolvedBrowserGpuMode(resolved: "hardware" | "software", reason: string): void {
+  console.error(`[hyperframes] browserGpuMode auto → ${resolved} (${reason})`);
+}
+
 export async function acquireBrowser(
   chromeArgs: string[],
   config?: Partial<
@@ -265,6 +378,8 @@ export interface BuildChromeArgsOptions {
   platform?: NodeJS.Platform;
 }
 
+const CANVAS_DRAW_ELEMENT_FEATURE_FLAG = "--enable-features=CanvasDrawElement";
+
 export function buildChromeArgs(
   options: BuildChromeArgsOptions,
   config?: Partial<Pick<EngineConfig, "browserGpuMode" | "disableGpu" | "chromePath">>,
@@ -282,6 +397,7 @@ export function buildChromeArgs(
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
+    CANVAS_DRAW_ELEMENT_FEATURE_FLAG,
     "--enable-webgl",
     "--ignore-gpu-blocklist",
     ...getBrowserGpuArgs(browserGpuMode, platform),
@@ -341,7 +457,20 @@ function getBrowserGpuArgs(
   platform: NodeJS.Platform,
 ): string[] {
   if (mode === "software") {
-    return ["--use-gl=angle", "--use-angle=swiftshader"];
+    // Chrome 120+ deprecated implicit SwiftShader fallback; the explicit
+    // path (--use-angle=swiftshader) keeps working but Chrome emits a
+    // deprecation warning unless --enable-unsafe-swiftshader is also set.
+    // Despite the name, this is exactly the behaviour Chrome had before;
+    // the flag exists to make CPU rasterisation an explicit opt-in rather
+    // than an implicit fallback for end users on the open web.
+    return ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"];
+  }
+
+  if (mode === "auto") {
+    // Should not reach here — `resolveBrowserGpuMode` collapses "auto" to
+    // "software" or "hardware" before args are built. Be defensive: software
+    // is the always-safe fallback.
+    return ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"];
   }
 
   switch (platform) {

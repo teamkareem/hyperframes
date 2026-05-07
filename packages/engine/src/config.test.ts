@@ -97,6 +97,13 @@ describe("resolveConfig", () => {
     expect(config.browserGpuMode).toBe("hardware");
   });
 
+  it("accepts 'auto' as a valid browser GPU mode env value", () => {
+    setEnv("PRODUCER_BROWSER_GPU_MODE", "auto");
+
+    const config = resolveConfig();
+    expect(config.browserGpuMode).toBe("auto");
+  });
+
   it("falls back to software browser GPU mode for invalid env values", () => {
     setEnv("PRODUCER_BROWSER_GPU_MODE", "native");
 

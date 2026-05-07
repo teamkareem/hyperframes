@@ -1,3 +1,4 @@
+import { swallow } from "./diagnostics";
 export type RuntimeMediaClip = {
   el: HTMLVideoElement | HTMLAudioElement;
   start: number;
@@ -78,6 +79,13 @@ export function refreshRuntimeMediaCache(params?: {
 // inactive so the next activation gets a hard resync on its first tick.
 const lastOffset = new WeakMap<HTMLMediaElement, number>();
 
+// Elements that had a seek past their buffered range (common with streaming
+// MP3 where preload="metadata" only fetches the first few seconds). After
+// setting preload="auto" and calling load(), we mark the element so subsequent
+// ticks don't restart the fetch in a loop while the browser downloads data.
+// Cleared when the clip leaves its active window.
+const seekLoadRetried = new WeakSet<HTMLMediaElement>();
+
 // Elements whose play() is in flight. The sync runs on a 50 ms poll and with
 // a 1–2 s buffer that would fire 20–40 spurious play() calls per element —
 // noise in devtools and, worse, each `.catch(() => {})` would swallow a real
@@ -112,6 +120,11 @@ export function syncRuntimeMedia(params: {
    */
   userMuted?: boolean;
   /**
+   * User's volume preference (0–1, set via `onSetVolume`). Multiplied with the
+   * per-clip author volume so `data-volume="0.5"` at user volume 0.8 yields 0.4.
+   */
+  userVolume?: number;
+  /**
    * Invoked at most once when a media element's `play()` promise rejects with
    * `NotAllowedError`. The caller is expected to latch and post a single
    * outbound message; further invocations are suppressed by the caller.
@@ -135,13 +148,22 @@ export function syncRuntimeMedia(params: {
           relTime = clip.mediaStart + ((relTime - clip.mediaStart) % loopLength);
         }
       }
-      if (clip.volume != null) el.volume = clip.volume;
+      const userVol = params.userVolume ?? 1;
+      el.volume = (clip.volume ?? 1) * userVol;
       if (shouldMute) el.muted = true;
+      // Ensure full preload for every active media element. Streaming
+      // formats (MP3) may arrive with preload="metadata", which only
+      // buffers the first few seconds and causes seeks to silently fail
+      // past the buffered range. Setting this on every tick is cheap
+      // (no-op when already "auto") and catches elements whose preload
+      // was overridden after init.ts set it.
+      if (el.preload !== "auto") el.preload = "auto";
       try {
         // Per-element rate × global transport rate
         el.playbackRate = clip.playbackRate * params.playbackRate;
-      } catch {
+      } catch (err) {
         // ignore unsupported playbackRate
+        swallow("runtime.media.site1", err);
       }
       // Drift correction. Forcing `el.currentTime = relTime` every frame
       // causes an audible seek+rebuffer hiccup (readyState drops briefly).
@@ -174,9 +196,31 @@ export function syncRuntimeMedia(params: {
       if (drift > 0.5 && (firstTickOfClip || offsetJumped || catastrophicDrift)) {
         try {
           el.currentTime = relTime;
-        } catch {
+        } catch (err) {
           // ignore browser seek restrictions
+          swallow("runtime.media.site2", err);
         }
+        // Detect failed seek: if currentTime didn't reach the target,
+        // the browser can't seek past its buffered range. Common with
+        // streaming MP3 where only the first ~15s is cached. Force a
+        // full network fetch via load() so the browser builds a complete
+        // media index. One-shot per element — subsequent sync ticks will
+        // re-attempt the seek once data arrives.
+        if (Math.abs(el.currentTime - relTime) > 0.5 && !seekLoadRetried.has(el)) {
+          seekLoadRetried.add(el);
+          el.load();
+          try {
+            el.currentTime = relTime;
+          } catch (err) {
+            // ignore — the seek will be retried on the next tick
+            swallow("runtime.media.site3", err);
+          }
+        }
+        // After a hard seek, clear the in-flight play guard so the next tick
+        // can re-issue play(). Without this, a seek during playback leaves
+        // the element paused at the new position for 50-150ms (one poll
+        // interval) while the timeline continues — audible desync on scrub.
+        playRequested.delete(el);
       }
       if (params.playing && el.paused && !playRequested.has(el)) {
         // `HTMLMediaElement.play()` is spec'd to queue playback and resolve
@@ -190,11 +234,6 @@ export function syncRuntimeMedia(params: {
         // seconds. The canplay listener was also racey — the event could
         // fire between `load()` and `addEventListener` attachment, wedging
         // the element waiting for a callback that never came.
-        //
-        // preload="auto" is already set at bind time in init.ts; the
-        // re-assignment here is defensive for media elements that were
-        // inserted after the runtime bound its listeners.
-        if (el.preload !== "auto") el.preload = "auto";
         markPlayRequested(el);
         void el.play().catch((err: unknown) => {
           // If play() rejects — e.g. autoplay blocked, element removed
@@ -219,6 +258,7 @@ export function syncRuntimeMedia(params: {
     // Clip left its active window — drop the offset baseline so the next
     // activation (e.g. re-entering a sub-composition) gets a hard resync.
     lastOffset.delete(el);
+    seekLoadRetried.delete(el);
     if (!el.paused) el.pause();
   }
 }

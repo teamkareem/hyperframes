@@ -86,6 +86,15 @@ declare global {
      * declared defaults from `<html data-composition-variables="...">`.
      */
     __hfVariables?: Record<string, unknown>;
+    /**
+     * Per-instance, pre-merged variables for sub-compositions. Keyed by the
+     * sub-composition's `data-composition-id`. Populated by the runtime
+     * composition loader at mount time: layers the host element's
+     * `data-variable-values` over the sub-comp's declared defaults so the
+     * scoped `getVariables()` exposed by `compositionScoping.ts` returns the
+     * resolved values for the instance currently executing.
+     */
+    __hfVariablesByComp?: Record<string, Record<string, unknown>>;
   }
 }
 

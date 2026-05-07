@@ -1,15 +1,18 @@
 import { defineCommand } from "citty";
-import type { Example } from "./_examples.js";
 import { execSync } from "node:child_process";
-
-export const examples: Example[] = [["Check system dependencies", "hyperframes doctor"]];
 import { freemem, platform } from "node:os";
+import type { Example } from "./_examples.js";
 import { c } from "../ui/colors.js";
 import { findBrowser } from "../browser/manager.js";
 import { findFFmpeg, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { VERSION } from "../version.js";
-import { getUpdateMeta } from "../utils/updateCheck.js";
+import { getUpdateMeta, withMeta } from "../utils/updateCheck.js";
 import { getSystemMeta, getShmSizeMb, getFreeDiskMb, bytesToMb } from "../telemetry/system.js";
+
+export const examples: Example[] = [
+  ["Check system dependencies", "hyperframes doctor"],
+  ["Output as JSON for CI / agents", "hyperframes doctor --json"],
+];
 
 interface Check {
   name: string;
@@ -181,14 +184,59 @@ function checkEnvironment(): CheckResult {
   return { ok: true, detail: parts.join(" \u00B7 ") };
 }
 
+export interface CheckOutcome {
+  name: string;
+  ok: boolean;
+  detail: string;
+  hint?: string;
+}
+
+/**
+ * Replace the user's home directory path with the literal string `$HOME` so
+ * JSON output pasted into bug reports or agent contexts doesn't leak usernames.
+ * Safe no-op when HOME/USERPROFILE is unset.
+ */
+export function redactHome(s: string): string {
+  const home = process.env["HOME"] || process.env["USERPROFILE"];
+  if (!home) return s;
+  return s.split(home).join("$HOME");
+}
+
+function redactOutcome(o: CheckOutcome): CheckOutcome {
+  return {
+    name: o.name,
+    ok: o.ok,
+    detail: redactHome(o.detail),
+    ...(o.hint ? { hint: redactHome(o.hint) } : {}),
+  };
+}
+
+/**
+ * Build the JSON report payload from raw check outcomes. Pure function so the
+ * output schema can be locked down with a snapshot test — any future refactor
+ * that renames fields, drops `hint`, or reorders `checks[]` will fail that
+ * test before it reaches users or agents parsing the output.
+ *
+ * @param options.redact - when true, replaces HOME paths in `detail`/`hint`
+ *   with the literal `$HOME`. Default off so tests can assert on raw values;
+ *   the CLI turns it on for `--json` output.
+ */
+export function buildDoctorReport(outcomes: CheckOutcome[], options: { redact?: boolean } = {}) {
+  const checks = options.redact ? outcomes.map(redactOutcome) : outcomes;
+  return withMeta({
+    ok: checks.every((o) => o.ok),
+    platform: process.platform,
+    arch: process.arch,
+    checks,
+  });
+}
+
 export default defineCommand({
   meta: { name: "doctor", description: "Check system dependencies and environment" },
-  args: {},
-  async run() {
-    console.log();
-    console.log(c.bold("hyperframes doctor"));
-    console.log();
-
+  args: {
+    json: { type: "boolean", description: "Output as JSON", default: false },
+  },
+  async run({ args }) {
     const checks: Check[] = [
       { name: "Version", run: checkVersion },
       { name: "Node.js", run: checkNode },
@@ -211,19 +259,42 @@ export default defineCommand({
       { name: "Docker running", run: checkDockerRunning },
     );
 
-    let allOk = true;
-
+    const outcomes: CheckOutcome[] = [];
     for (const check of checks) {
       const result = await check.run();
-      const icon = result.ok ? c.success("\u2713") : c.error("\u2717");
-      const name = check.name.padEnd(16);
+      outcomes.push({
+        name: check.name,
+        ok: result.ok,
+        detail: result.detail,
+        ...(result.hint ? { hint: result.hint } : {}),
+      });
+    }
+    const allOk = outcomes.every((o) => o.ok);
+
+    if (args.json) {
+      // Exit code intentionally reflects command success, not environment
+      // health — `checkVersion` returns ok:false when an npm update is
+      // available, which would poison any CI pipeline doing
+      // `hyperframes doctor --json || fail` the next time a new version is
+      // published. Consumers who want a gate can do:
+      //   hyperframes doctor --json | jq -e '.ok' > /dev/null || handle_failure
+      console.log(JSON.stringify(buildDoctorReport(outcomes, { redact: true }), null, 2));
+      return;
+    }
+
+    console.log();
+    console.log(c.bold("hyperframes doctor"));
+    console.log();
+
+    for (const outcome of outcomes) {
+      const icon = outcome.ok ? c.success("\u2713") : c.error("\u2717");
+      const name = outcome.name.padEnd(16);
       console.log(
-        `  ${icon} ${c.bold(name)} ${result.ok ? c.dim(result.detail) : c.error(result.detail)}`,
+        `  ${icon} ${c.bold(name)} ${outcome.ok ? c.dim(outcome.detail) : c.error(outcome.detail)}`,
       );
-      if (!result.ok && result.hint) {
-        console.log(`  ${" ".repeat(19)}${c.accent(result.hint)}`);
+      if (!outcome.ok && outcome.hint) {
+        console.log(`  ${" ".repeat(19)}${c.accent(outcome.hint)}`);
       }
-      if (!result.ok) allOk = false;
     }
 
     console.log();

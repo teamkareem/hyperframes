@@ -9,6 +9,8 @@ import { fetchItemManifest, fetchRegistryManifest, DEFAULT_REGISTRY_URL } from "
 
 export interface ResolveOptions {
   baseUrl?: string;
+  /** Bypass the 24h manifest cache and fetch fresh data from the registry. */
+  skipCache?: boolean;
   /**
    * Called once per item that fails to load inside `loadAllItems`. Defaults
    * to writing a diagnostic line to stderr. Pass a quieter implementation
@@ -30,7 +32,7 @@ export async function listRegistryItems(
   options: ResolveOptions = {},
 ): Promise<RegistryManifestEntry[]> {
   const baseUrl = options.baseUrl ?? DEFAULT_REGISTRY_URL;
-  const manifest = await fetchRegistryManifest(baseUrl);
+  const manifest = await fetchRegistryManifest(baseUrl, { skipCache: options.skipCache });
   if (!manifest) return [];
   if (!filter?.type) return manifest.items;
   return manifest.items.filter((item) => item.type === filter.type);
@@ -86,4 +88,20 @@ export async function resolveItem(
     );
   }
   return fetchItemManifest(entry.name, entry.type, options.baseUrl);
+}
+
+/**
+ * Resolve all items matching a tag. Loads each item's full manifest to check
+ * tags (the top-level registry.json only has name+type, not tags). Items that
+ * fail to load are silently skipped.
+ */
+export async function resolveItemsByTag(
+  tag: string,
+  options: ResolveOptions = {},
+): Promise<RegistryItem[]> {
+  const entries = await listRegistryItems(undefined, options);
+  const allItems = await loadAllItems(entries, { ...options, onWarn: () => {} });
+  return allItems.filter(
+    (item) => "tags" in item && Array.isArray(item.tags) && item.tags.includes(tag),
+  );
 }

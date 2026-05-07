@@ -7,6 +7,7 @@ on:
       - "registry/blocks/**"
       - "registry/components/**"
       - "scripts/generate-catalog-previews.ts"
+      - ".github/workflows/catalog-previews.yml"
 
 concurrency:
   group: catalog-previews-${{ github.ref }}
@@ -37,14 +38,11 @@ jobs:
         with:
           chrome-version: stable
 
-      # FFmpeg for video encoding
-      - uses: FedericoCarboni/setup-ffmpeg@36c6454b5a2348e7794ba2d82a21506605921e3d # v3
-
       - name: Render changed block/component previews
         run: |
           # Find which blocks/components changed in this PR
           BASE_SHA=${{ github.event.pull_request.base.sha }}
-          CHANGED_ITEMS=$(git diff --name-only "$BASE_SHA"...HEAD -- registry/blocks/ registry/components/ \
+          CHANGED_ITEMS=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD -- registry/blocks/ registry/components/ \
             | grep -E '^registry/(blocks|components)/' \
             | sed 's|^registry/[^/]*/\([^/]*\)/.*|\1|' \
             | sort -u)

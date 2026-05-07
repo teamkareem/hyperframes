@@ -644,4 +644,117 @@ describe("composition rules", () => {
       expect(finding).toBeUndefined();
     });
   });
+
+  describe("invalid_variable_values_json", () => {
+    it("warns when data-variable-values is unparseable JSON", () => {
+      const html = `<html><body>
+<div data-composition-id="card-1" data-composition-src="card.html" data-variable-values='{not json'></div>
+</body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find((f) => f.code === "invalid_variable_values_json");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("warning");
+    });
+
+    it("warns when data-variable-values is a JSON array (must be an object)", () => {
+      const html = `<html><body>
+<div data-composition-src="card.html" data-variable-values='[1,2,3]'></div>
+</body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find((f) => f.code === "invalid_variable_values_json");
+      expect(finding).toBeDefined();
+      expect(finding?.message).toMatch(/must be a JSON object/);
+    });
+
+    it("warns when data-variable-values is a JSON string (must be an object)", () => {
+      const html = `<html><body>
+<div data-composition-src="card.html" data-variable-values='"hello"'></div>
+</body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find((f) => f.code === "invalid_variable_values_json");
+      expect(finding).toBeDefined();
+    });
+
+    it("does not warn for a valid JSON object", () => {
+      const html = `<html><body>
+<div data-composition-src="card.html" data-variable-values='{"title":"Hello","count":3}'></div>
+</body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find((f) => f.code === "invalid_variable_values_json");
+      expect(finding).toBeUndefined();
+    });
+
+    it("does not warn when data-variable-values is absent", () => {
+      const html = `<html><body>
+<div data-composition-src="card.html"></div>
+</body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find((f) => f.code === "invalid_variable_values_json");
+      expect(finding).toBeUndefined();
+    });
+  });
+
+  describe("invalid_composition_variables_declaration", () => {
+    it("warns when data-composition-variables is unparseable JSON", () => {
+      const html = `<html data-composition-variables='[{not json'><body><div data-composition-id="x"></div></body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find(
+        (f) => f.code === "invalid_composition_variables_declaration",
+      );
+      expect(finding).toBeDefined();
+    });
+
+    it("warns when data-composition-variables is not an array", () => {
+      const html = `<html data-composition-variables='{"title":"Hello"}'><body><div data-composition-id="x"></div></body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find(
+        (f) => f.code === "invalid_composition_variables_declaration",
+      );
+      expect(finding).toBeDefined();
+      expect(finding?.message).toMatch(/array of variable declarations/);
+    });
+
+    it("warns per-entry when an entry is missing required fields", () => {
+      const html = `<html data-composition-variables='[{"id":"ok","type":"string","label":"Ok","default":"x"},{"id":"bad"}]'><body><div data-composition-id="x"></div></body></html>`;
+      const result = lintHyperframeHtml(html);
+      const findings = result.findings.filter(
+        (f) => f.code === "invalid_composition_variables_declaration",
+      );
+      expect(findings.length).toBe(1);
+      expect(findings[0]?.message).toMatch(/\[1\]/);
+      expect(findings[0]?.message).toMatch(/type|label|default/);
+    });
+
+    it("warns when a declaration uses an unknown type", () => {
+      const html = `<html data-composition-variables='[{"id":"x","type":"date","label":"X","default":"y"}]'><body><div data-composition-id="x"></div></body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find(
+        (f) => f.code === "invalid_composition_variables_declaration",
+      );
+      expect(finding).toBeDefined();
+      expect(finding?.message).toMatch(/type/);
+    });
+
+    it("does not warn for a fully valid declarations array", () => {
+      const html = `<html data-composition-variables='[
+        {"id":"title","type":"string","label":"Title","default":"Hello"},
+        {"id":"count","type":"number","label":"Count","default":3},
+        {"id":"theme","type":"enum","label":"Theme","default":"light","options":[{"value":"light","label":"Light"}]}
+      ]'><body><div data-composition-id="x"></div></body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find(
+        (f) => f.code === "invalid_composition_variables_declaration",
+      );
+      expect(finding).toBeUndefined();
+    });
+
+    it("does not warn when data-composition-variables is absent", () => {
+      const html = `<html><body><div data-composition-id="x"></div></body></html>`;
+      const result = lintHyperframeHtml(html);
+      const finding = result.findings.find(
+        (f) => f.code === "invalid_composition_variables_declaration",
+      );
+      expect(finding).toBeUndefined();
+    });
+  });
 });
