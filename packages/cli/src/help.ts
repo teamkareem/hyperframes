@@ -52,6 +52,10 @@ const GROUPS: Group[] = [
     ],
   },
   {
+    title: "Deploy",
+    commands: [["lambda", "Deploy and drive distributed renders on AWS Lambda"]],
+  },
+  {
     title: "AI & Integrations",
     commands: [
       ["skills", "Install HyperFrames and GSAP skills for AI coding tools"],
@@ -64,8 +68,15 @@ const GROUPS: Group[] = [
     ],
   },
   {
+    title: "Account",
+    commands: [["auth", "Sign in to HeyGen and manage credentials"]],
+  },
+  {
     title: "Settings",
-    commands: [["telemetry", "Manage anonymous usage telemetry"]],
+    commands: [
+      ["feedback", "Submit anonymous feedback about your experience"],
+      ["telemetry", "Manage anonymous usage telemetry"],
+    ],
   },
 ];
 

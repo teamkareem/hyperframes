@@ -14,10 +14,11 @@ import { c } from "../ui/colors.js";
 import { formatBytes, formatDuration, errorBox } from "../ui/format.js";
 import * as clack from "@clack/prompts";
 import { withMeta } from "../utils/updateCheck.js";
+import { fpsToFfmpegArg } from "@hyperframes/core";
 
 interface BenchmarkConfig {
   label: string;
-  fps: 24 | 30 | 60;
+  fps: import("@hyperframes/core").Fps;
   quality: "draft" | "standard" | "high";
   workers: number;
 }
@@ -35,12 +36,14 @@ interface ConfigResult {
   avgSize: number | null;
 }
 
+const FPS_30: import("@hyperframes/core").Fps = { num: 30, den: 1 };
+const FPS_60: import("@hyperframes/core").Fps = { num: 60, den: 1 };
 const DEFAULT_CONFIGS: BenchmarkConfig[] = [
-  { label: "30fps \u00B7 draft \u00B7 2w", fps: 30, quality: "draft", workers: 2 },
-  { label: "30fps \u00B7 standard \u00B7 2w", fps: 30, quality: "standard", workers: 2 },
-  { label: "30fps \u00B7 high \u00B7 2w", fps: 30, quality: "high", workers: 2 },
-  { label: "30fps \u00B7 standard \u00B7 4w", fps: 30, quality: "standard", workers: 4 },
-  { label: "60fps \u00B7 standard \u00B7 4w", fps: 60, quality: "standard", workers: 4 },
+  { label: "30fps \u00B7 draft \u00B7 2w", fps: FPS_30, quality: "draft", workers: 2 },
+  { label: "30fps \u00B7 standard \u00B7 2w", fps: FPS_30, quality: "standard", workers: 2 },
+  { label: "30fps \u00B7 high \u00B7 2w", fps: FPS_30, quality: "high", workers: 2 },
+  { label: "30fps \u00B7 standard \u00B7 4w", fps: FPS_30, quality: "standard", workers: 4 },
+  { label: "60fps \u00B7 standard \u00B7 4w", fps: FPS_60, quality: "standard", workers: 4 },
 ];
 
 export default defineCommand({
@@ -162,7 +165,10 @@ export default defineCommand({
           withMeta({
             results: results.map((r) => ({
               config: r.config.label,
-              fps: r.config.fps,
+              // Emit fps in the on-the-wire form so the JSON payload is
+              // round-trippable through `parseFps` (e.g. "30000/1001" stays
+              // exact; integer fps stays integer).
+              fps: fpsToFfmpegArg(r.config.fps),
               quality: r.config.quality,
               workers: r.config.workers,
               avgTimeMs: r.avgTime,

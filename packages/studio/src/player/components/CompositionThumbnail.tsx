@@ -5,8 +5,8 @@ interface CompositionThumbnailProps {
   previewUrl: string;
   label: string;
   labelColor: string;
-  accentColor?: string;
   selector?: string;
+  selectorIndex?: number;
   seekTime?: number;
   duration?: number;
   width?: number;
@@ -14,14 +14,45 @@ interface CompositionThumbnailProps {
 }
 
 const CLIP_HEIGHT = 66;
-const THUMBNAIL_URL_VERSION = "v2";
+const THUMBNAIL_URL_VERSION = "v3";
+
+export function buildCompositionThumbnailUrl({
+  previewUrl,
+  seekTime = 2,
+  duration = 5,
+  selector,
+  selectorIndex,
+  origin,
+}: {
+  previewUrl: string;
+  seekTime?: number;
+  duration?: number;
+  selector?: string;
+  selectorIndex?: number;
+  origin: string;
+}): string {
+  const thumbnailBase = previewUrl
+    .replace("/preview/comp/", "/thumbnail/")
+    .replace(/\/preview$/, "/thumbnail/index.html");
+  const midTime = seekTime + duration / 2;
+  const thumbnailUrl = new URL(thumbnailBase, origin);
+  thumbnailUrl.searchParams.set("t", midTime.toFixed(2));
+  thumbnailUrl.searchParams.set("v", THUMBNAIL_URL_VERSION);
+  if (selector) {
+    thumbnailUrl.searchParams.set("selector", selector);
+    if (selectorIndex != null && selectorIndex > 0) {
+      thumbnailUrl.searchParams.set("selectorIndex", String(selectorIndex));
+    }
+  }
+  return thumbnailUrl.toString();
+}
 
 export const CompositionThumbnail = memo(function CompositionThumbnail({
   previewUrl,
   label,
   labelColor,
-  accentColor = "#6B7280",
   selector,
+  selectorIndex,
   seekTime = 2,
   duration = 5,
 }: CompositionThumbnailProps) {
@@ -48,15 +79,14 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
     roRef.current?.disconnect();
   });
 
-  const thumbnailBase = previewUrl
-    .replace("/preview/comp/", "/thumbnail/")
-    .replace(/\/preview$/, "/thumbnail/index.html");
-  const midTime = seekTime + duration / 2;
-  const thumbnailUrl = new URL(thumbnailBase, window.location.origin);
-  thumbnailUrl.searchParams.set("t", midTime.toFixed(2));
-  thumbnailUrl.searchParams.set("v", THUMBNAIL_URL_VERSION);
-  if (selector) thumbnailUrl.searchParams.set("selector", selector);
-  const url = thumbnailUrl.toString();
+  const url = buildCompositionThumbnailUrl({
+    previewUrl,
+    seekTime,
+    duration,
+    selector,
+    selectorIndex,
+    origin: window.location.origin,
+  });
   const frameW = Math.max(48, Math.round(CLIP_HEIGHT * aspect));
   const frameCount = containerWidth > 0 ? Math.max(1, Math.ceil(containerWidth / frameW)) : 1;
 
@@ -66,7 +96,7 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
         src={url}
         alt=""
         draggable={false}
-        loading="lazy"
+        loading="eager"
         onLoad={(e) => {
           const img = e.currentTarget;
           if (img.naturalWidth > 0 && img.naturalHeight > 0) {
@@ -77,8 +107,11 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
         className="hidden"
       />
 
-      {loaded ? (
-        <div className="absolute inset-0 flex">
+      {loaded && (
+        <div
+          className="absolute inset-0 flex"
+          style={{ animation: "hf-thumb-fade 200ms ease-out", mixBlendMode: "lighten" }}
+        >
           {Array.from({ length: frameCount }).map((_, i) => (
             <div
               key={i}
@@ -89,51 +122,21 @@ export const CompositionThumbnail = memo(function CompositionThumbnail({
                 src={url}
                 alt=""
                 draggable={false}
-                className="absolute inset-0 h-full w-full object-cover opacity-60"
+                className="absolute inset-0 h-full w-full object-cover"
+                style={{ opacity: 0.7 }}
               />
             </div>
           ))}
         </div>
-      ) : (
-        <div
-          className="absolute inset-0 animate-pulse"
-          style={{
-            background:
-              "linear-gradient(90deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.05) 50%, rgba(255,255,255,0.02) 100%)",
-          }}
-        />
       )}
 
-      <div
-        className="absolute inset-0"
-        style={{
-          background: `linear-gradient(120deg, ${accentColor}2e, transparent 34%), linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0.08))`,
-        }}
-      />
-
-      <div className="absolute left-2 top-2 z-10">
+      <div className="absolute left-3 top-0 bottom-0 flex items-center" style={{ zIndex: 10 }}>
         <span
-          className="block max-w-full truncate rounded-md px-1.5 py-0.5 text-[9px] font-semibold uppercase leading-none"
+          className="block max-w-full truncate text-[10px] font-semibold leading-none"
           style={{
             color: labelColor,
-            background: `${accentColor}2e`,
-            boxShadow: `inset 0 0 0 1px ${accentColor}40`,
+            textShadow: loaded ? "0 1px 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6)" : "none",
           }}
-        >
-          {label}
-        </span>
-      </div>
-
-      <div
-        className="absolute bottom-0 left-0 right-0 z-10 px-1.5 pb-0.5 pt-3"
-        style={{
-          background:
-            "linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%)",
-        }}
-      >
-        <span
-          className="block truncate text-[9px] font-semibold leading-tight"
-          style={{ color: labelColor, textShadow: "0 1px 2px rgba(0,0,0,0.9)" }}
         >
           {label}
         </span>

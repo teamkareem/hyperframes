@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { readStudioUiPreferences, writeStudioUiPreferences } from "../../utils/studioUiPreferences";
 
 export interface TimelineElement {
   id: string;
@@ -23,6 +24,10 @@ export interface TimelineElement {
   volume?: number;
   /** Path from data-composition-src — identifies sub-composition elements */
   compositionSrc?: string;
+  /** Whether this row came from authored clip timing or Studio's full-duration layer fallback. */
+  timingSource?: "authored" | "implicit";
+  /** Set by data-timeline-locked on the host element — disables move and trim in Studio. */
+  timelineLocked?: boolean;
 }
 
 export type ZoomMode = "fit" | "manual";
@@ -35,16 +40,22 @@ interface PlayerState {
   elements: TimelineElement[];
   selectedElementId: string | null;
   playbackRate: number;
+  audioMuted: boolean;
   loopEnabled: boolean;
   /** Timeline zoom: 'fit' auto-scales to viewport, 'manual' uses manualZoomPercent */
   zoomMode: ZoomMode;
   /** Timeline zoom percent relative to the fit width when in manual mode */
   manualZoomPercent: number;
+  /** Work-area in-point (seconds). When set, loop starts here and A jumps here. */
+  inPoint: number | null;
+  /** Work-area out-point (seconds). When set, loop ends here and E jumps here. */
+  outPoint: number | null;
 
   setIsPlaying: (playing: boolean) => void;
   setCurrentTime: (time: number) => void;
   setDuration: (duration: number) => void;
   setPlaybackRate: (rate: number) => void;
+  setAudioMuted: (muted: boolean) => void;
   setLoopEnabled: (enabled: boolean) => void;
   setTimelineReady: (ready: boolean) => void;
   setElements: (elements: TimelineElement[]) => void;
@@ -55,7 +66,17 @@ interface PlayerState {
   ) => void;
   setZoomMode: (mode: ZoomMode) => void;
   setManualZoomPercent: (percent: number) => void;
+  setInPoint: (time: number | null) => void;
+  setOutPoint: (time: number | null) => void;
   reset: () => void;
+
+  /**
+   * Request a seek from outside the player loop (e.g. Layers panel).
+   * useTimelinePlayer subscribes and calls adapter.seek() + liveTime.notify().
+   */
+  requestedSeekTime: number | null;
+  requestSeek: (time: number) => void;
+  clearSeekRequest: () => void;
 }
 
 // Lightweight pub-sub for current time during playback.
@@ -78,15 +99,50 @@ export const usePlayerStore = create<PlayerState>((set) => ({
   timelineReady: false,
   elements: [],
   selectedElementId: null,
-  playbackRate: 1,
+  playbackRate: readStudioUiPreferences().playbackRate ?? 1,
+  audioMuted: readStudioUiPreferences().audioMuted ?? false,
   loopEnabled: false,
   zoomMode: "fit",
   manualZoomPercent: 100,
+  inPoint: null,
+  outPoint: null,
+
+  requestedSeekTime: null,
+  requestSeek: (time) => set({ requestedSeekTime: time }),
+  clearSeekRequest: () => set({ requestedSeekTime: null }),
 
   setIsPlaying: (playing) => set({ isPlaying: playing }),
-  setPlaybackRate: (rate) => set({ playbackRate: rate }),
+  setPlaybackRate: (rate) => {
+    writeStudioUiPreferences({ playbackRate: rate });
+    set({ playbackRate: rate });
+  },
+  setAudioMuted: (muted) => {
+    writeStudioUiPreferences({ audioMuted: muted });
+    set({ audioMuted: muted });
+  },
   setLoopEnabled: (enabled) => set({ loopEnabled: enabled }),
   setZoomMode: (mode) => set({ zoomMode: mode }),
+  setInPoint: (time) =>
+    set((state) => {
+      const t = time !== null && Number.isFinite(time) ? time : null;
+      return {
+        inPoint: t,
+        outPoint:
+          t !== null && state.outPoint !== null && t >= state.outPoint ? null : state.outPoint,
+        // Setting a work-area marker implies the user wants playback bounded by it.
+        // Auto-enable loop so the playhead respects the marker instead of running past.
+        loopEnabled: t !== null ? true : state.loopEnabled,
+      };
+    }),
+  setOutPoint: (time) =>
+    set((state) => {
+      const t = time !== null && Number.isFinite(time) ? time : null;
+      return {
+        outPoint: t,
+        inPoint: t !== null && state.inPoint !== null && t <= state.inPoint ? null : state.inPoint,
+        loopEnabled: t !== null ? true : state.loopEnabled,
+      };
+    }),
   setManualZoomPercent: (percent) =>
     set({ manualZoomPercent: Math.max(10, Math.min(2000, Math.round(percent))) }),
   setCurrentTime: (time) => set({ currentTime: Number.isFinite(time) ? time : 0 }),
@@ -101,7 +157,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       ),
     })),
   // Resets project-specific state when switching compositions.
-  // playbackRate, loopEnabled, zoomMode, and manualZoomPercent are intentionally preserved
+  // playbackRate, audioMuted, loopEnabled, zoomMode, and manualZoomPercent are intentionally preserved
   // because they are user preferences that should survive project switches.
   reset: () =>
     set({
@@ -111,5 +167,7 @@ export const usePlayerStore = create<PlayerState>((set) => ({
       timelineReady: false,
       elements: [],
       selectedElementId: null,
+      inPoint: null,
+      outPoint: null,
     }),
 }));

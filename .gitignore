@@ -20,6 +20,8 @@ Thumbs.db
 # non-generated assets (logos, svgs) that should stay in the repo.
 docs/images/
 
+videos/
+
 # IDE
 .vscode/
 .idea/
@@ -32,6 +34,7 @@ coverage/
 
 # Producer regression test failures (generated debugging artifacts)
 packages/producer/tests/*/failures/
+packages/producer/tests/distributed/*/failures/
 packages/producer/tests/parity/fixtures/hyperframe.runtime.iife.js
 
 # Player perf test results (generated each run, attached as CI artifact)
@@ -41,6 +44,7 @@ packages/player/tests/perf/results/
 output/
 renders/
 !packages/producer/tests/*/output/
+!packages/producer/tests/distributed/*/output/
 
 # Composition source media (large binaries)
 compositions/**/*.mp4
@@ -62,10 +66,17 @@ tmp/
 packages/core/src/generated/
 packages/producer/src/services/fontData.generated.ts
 
-# Test artifacts
+# Local proof / test artifacts
+qa-artifacts/
 my-video/
-examples/
+examples/*
+# Tracked OSS examples — negations override the blanket `examples/*` ignore.
+!examples/aws-lambda
+!examples/aws-lambda/**
+!examples/k8s-jobs
+!examples/k8s-jobs/**
 packages/studio/data/
+
 .desloppify/
 .worktrees/
 
@@ -96,7 +107,23 @@ captures/
 cursor-tests/
 basecamp-video/
 launch-video*/
+!skills/launch-video/
 ab-test/
 compositions/
 video-6-2-patched/
 claude-design-hyperframes-video/
+# Per-site video work at the repo root (huly-*, raycast-*, etc.)
+# Anything under videos/ is already covered above, but agents sometimes write
+# project dirs to the repo root when iterating. Catch the common per-brand
+# patterns and any *-demo-N variants the *-demo/ rule above misses.
+huly-*/
+raycast-*/
+*-demo-*/
+test-runs/
+test-outputs/
+
+# Claude Code worktrees + superpowers docs
+.claude/worktrees/
+.claude/
+docs/superpowers/
+.worktrees

@@ -1,3 +1,6 @@
+import type { CanvasResolution } from "../core.types.js";
+import type { RegistryItem } from "../registry/types.js";
+
 /** Resolved info about a single project. */
 export interface ResolvedProject {
   id: string;
@@ -50,6 +53,16 @@ export interface StudioApiAdapter {
   /** URL to the hyperframe runtime JS (injected into preview HTML). */
   runtimeUrl: string;
 
+  /**
+   * Optional: post-process preview HTML before Studio augments it.
+   * Useful when preview must mirror render-time compilation steps.
+   */
+  transformPreviewHtml?: (opts: {
+    html: string;
+    project: ResolvedProject;
+    activeCompositionPath: string;
+  }) => Promise<string> | string;
+
   /** Directory where render output files are stored. */
   rendersDir(project: ResolvedProject): string;
 
@@ -61,9 +74,23 @@ export interface StudioApiAdapter {
     project: ResolvedProject;
     outputPath: string;
     format: "mp4" | "webm" | "mov";
-    fps: number;
+    /**
+     * Frame rate as an exact rational. The HTTP layer (POST
+     * `/projects/:id/render`) accepts either a JSON number (integer fps,
+     * `30`) or a JSON string (ffmpeg-style rational, `"30000/1001"`); the
+     * route normalizes both into `Fps` before invoking the adapter, so
+     * adapter implementations only ever see the rational form.
+     */
+    fps: import("../core.types.js").Fps;
     quality: string;
     jobId: string;
+    /**
+     * Optional output resolution preset. See `resolveDeviceScaleFactor` in
+     * the producer for the integer-scale + aspect + HDR constraints.
+     */
+    outputResolution?: CanvasResolution;
+    /** Entry file relative to projectDir (e.g. "compositions/intro.html"). Defaults to index.html. */
+    composition?: string;
   }): RenderJobState;
 
   /** Optional: generate a JPEG thumbnail via Puppeteer or similar. */
@@ -76,8 +103,18 @@ export interface StudioApiAdapter {
     previewUrl: string;
     selector?: string;
     format?: "jpeg" | "png";
+    selectorIndex?: number;
   }) => Promise<Buffer | null>;
 
   /** Optional: resolve session ID to project (multi-project mode). */
   resolveSession?: (sessionId: string) => Promise<{ projectId: string; title: string } | null>;
+
+  /** Optional: list all registry items (blocks + components) for the catalog. */
+  listRegistryCatalog?(): Promise<RegistryItem[]>;
+
+  /** Optional: install a registry item into a project directory. */
+  installRegistryBlock?(opts: {
+    project: ResolvedProject;
+    blockName: string;
+  }): Promise<{ written: string[]; block: RegistryItem }>;
 }

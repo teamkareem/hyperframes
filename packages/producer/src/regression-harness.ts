@@ -18,7 +18,49 @@ import { createRenderJob, executeRenderJob } from "./services/renderOrchestrator
 import { compileForRender } from "./services/htmlCompiler.js";
 import { validateCompilation } from "./services/compilationTester.js";
 import { extractMediaMetadata } from "./utils/ffprobe.js";
-import { buildRmsEnvelope, compareAudioEnvelopes } from "./utils/audioRegression.js";
+import {
+  buildRmsEnvelope,
+  compareAudioEnvelopes,
+  computeAudioResidualRmsDb,
+} from "./utils/audioRegression.js";
+import { parseFps, fpsToNumber } from "@hyperframes/core";
+import {
+  checkDistributedSupport,
+  type HarnessMode,
+  parseHarnessModeFlag,
+  resolveMinPsnrForMode,
+  runDistributedSimulatedRender,
+} from "./regression-harness-distributed.js";
+
+// `regression-harness-lambda-local` statically imports
+// `@hyperframes/aws-lambda`, which depends on @aws-sdk + @sparticuz/chromium.
+// In Dockerfile.test the workspace copy of aws-lambda's src isn't present,
+// so a static import here would fail at module-load time even when
+// running `--mode=in-process`. Load it on demand instead.
+//
+// The signature is typed via `RunLambdaLocalRender` (in its own types-only
+// file) instead of `typeof import(...)` so producer's tsc doesn't have to
+// type-check the implementation. The implementation imports
+// `@hyperframes/aws-lambda`, whose types come from `dist/index.d.ts` after
+// aws-lambda's build runs — a chicken-and-egg with producer's tsc that
+// would otherwise fail the whole-repo build.
+//
+// The dynamic import path is indirected through a variable so tsc can't
+// statically resolve the target file. Without this indirection tsc still
+// pulls `regression-harness-lambda-local.ts` (and its `@hyperframes/aws-lambda`
+// imports) into the program even though the tsconfig `exclude` list
+// nominally hides it. `tsx` resolves the path normally at runtime.
+import type { RunLambdaLocalRender } from "./regression-harness-lambda-local-types.js";
+import type { DistributedFormat } from "./services/distributed/shared.js";
+
+const LAMBDA_LOCAL_MODULE = "./regression-harness-lambda-local.js";
+
+async function loadLambdaLocalRender(): Promise<RunLambdaLocalRender> {
+  const mod = (await import(LAMBDA_LOCAL_MODULE)) as {
+    runLambdaLocalRender: RunLambdaLocalRender;
+  };
+  return mod.runLambdaLocalRender;
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,9 +72,44 @@ type TestMetadata = {
   maxFrameFailures: number;
   minAudioCorrelation: number;
   maxAudioLagWindows: number;
+  /**
+   * Optional residual-RMS check. Subtracts the rendered audio from the
+   * baseline and reads the residual Overall RMS via `astats`. A value
+   * of `-50` treats residuals at-or-below -50 dBFS as effectively-
+   * silent — i.e. the streams are sample-level equivalent. Omit
+   * (undefined) to skip the check; fixtures authored before this field
+   * was introduced have implicit `undefined`.
+   */
+  maxAudioResidualRmsDb?: number;
   renderConfig: {
-    fps: 24 | 30 | 60;
-    format?: "mp4" | "webm"; // Optional: defaults to "mp4"
+    /**
+     * Frame rate. Stored on disk as a JSON number (integer fps, e.g. `30`)
+     * for legacy meta.json files, or a JSON string (`"30000/1001"` for NTSC)
+     * for rationals. The metadata validator normalizes both into an `Fps`
+     * rational at load time so downstream code only sees the structured form.
+     */
+    fps: import("@hyperframes/core").Fps;
+    /**
+     * Output container. Defaults to `"mp4"`. `"png-sequence"` makes the
+     * rendered output a directory of zero-padded RGBA PNGs instead of a
+     * single video file — the harness branches its comparison logic
+     * accordingly (per-frame byte equality instead of PSNR). `"mov"` and
+     * `"webm"` are encoded video containers that share the PSNR path with
+     * `"mp4"`. Distributed mode supports all four — webm goes through
+     * libvpx-vp9 with closed-GOP concat-copy.
+     */
+    format?: DistributedFormat;
+    /**
+     * Codec selection for `format: "mp4"`, forwarded to
+     * `DistributedRenderConfig.codec`. The in-process renderer doesn't take
+     * a codec hint — for the baseline it always picks the format's default
+     * (h264 for mp4 SDR), so `codec: "h265"` is exercised exclusively in
+     * `--mode=distributed-simulated`. The PSNR comparison against the
+     * baseline therefore measures "h265 chunked + concat" ≈ "h264 single-
+     * pass" rather than byte equality. Fixtures asserting a tighter
+     * contract should explicitly pin a higher `minPsnr`.
+     */
+    codec?: "h264" | "h265";
     workers?: number; // Optional: auto-calculates if omitted
     /** Force HDR in the harness; omitted/false preserves historical SDR-only test behavior. */
     hdr?: boolean;
@@ -44,6 +121,18 @@ type TestMetadata = {
      * and these overrides. Omit when the test doesn't exercise variables.
      */
     variables?: Record<string, unknown>;
+    /**
+     * Chunk size in frames for `--mode=distributed-simulated`. Forwarded
+     * to `DistributedRenderConfig.chunkSize`. Ignored in `--mode=in-process`.
+     * Default is the plan's own default (240 frames).
+     */
+    chunkSize?: number;
+    /**
+     * Cap on parallel chunks for `--mode=distributed-simulated`. Forwarded
+     * to `DistributedRenderConfig.maxParallelChunks`. Ignored in
+     * `--mode=in-process`. Default is the plan's own default (16).
+     */
+    maxParallelChunks?: number;
   };
 };
 
@@ -60,11 +149,26 @@ type CliOptions = {
   update: boolean;
   sequential: boolean;
   keepTemp: boolean;
+  /**
+   * Which render path to exercise. `in-process` (default) calls
+   * `executeRenderJob`; `distributed-simulated` calls
+   * `plan() → renderChunk() × N → assemble()` from
+   * `@hyperframes/producer/distributed`. See
+   * `regression-harness-distributed.ts`.
+   */
+  mode: HarnessMode;
 };
 
 type TestResult = {
   suite: TestSuite;
   passed: boolean;
+  /**
+   * Set when `--mode=distributed-simulated` skips a fixture that the
+   * distributed pipeline can't run (HDR, NTSC fps, fps∉{24,30,60}).
+   * `passed` is `true` for skipped fixtures — skipping is a clean outcome,
+   * not a failure — but the summary distinguishes them.
+   */
+  skipped?: { reason: string };
   compilation?: {
     passed: boolean;
     errors: string[];
@@ -79,6 +183,15 @@ type TestResult = {
     passed: boolean;
     correlation: number;
     lagWindows: number;
+    /**
+     * Residual Overall RMS (dBFS) of `rendered - snapshot`. Present only
+     * when the fixture opts in via `meta.maxAudioResidualRmsDb`.
+     * `Number.NEGATIVE_INFINITY` ⇒ perfect cancellation. `NaN` ⇒ residual
+     * check could not run (missing ffmpeg, duration mismatch, ...); see
+     * `audio.residualError` for the reason.
+     */
+    residualRmsDb?: number;
+    residualError?: string;
   };
   renderedOutputPath?: string;
 };
@@ -92,12 +205,35 @@ function logPretty(message: string, emoji = "•") {
   console.error(`${emoji} ${message}`);
 }
 
+/**
+ * Format the residual-RMS suffix used in the audio-quality log line.
+ *
+ * Three states must surface distinctly:
+ *   • `null`            → fixture didn't opt into residual RMS         → "" (no suffix)
+ *   • `NaN`             → check ran but produced no parseable reading  → "(error: ...)"
+ *   • `-Infinity`       → perfect cancellation (identical streams)     → "-inf dBFS"
+ *   • finite number     → measured residual                            → "<value> dBFS"
+ *
+ * Pre-fix this branched on `Number.isFinite()` only, collapsing NaN
+ * (a real-failure signal) into the `-inf` label (a perfect-match signal).
+ */
+function formatResidualSuffix(residualRmsDb: number | null, error: string | undefined): string {
+  if (residualRmsDb === null && !error) return "";
+  if (error) return `, residualRMS: error (${error})`;
+  if (residualRmsDb === null || Number.isNaN(residualRmsDb)) {
+    return ", residualRMS: error (no parseable reading)";
+  }
+  if (!Number.isFinite(residualRmsDb)) return ", residualRMS: -inf dBFS";
+  return `, residualRMS: ${residualRmsDb.toFixed(2)} dBFS`;
+}
+
 function parseArgs(argv: string[]): CliOptions {
   const testNames: string[] = [];
   const excludeTags: string[] = [];
   let update = false;
   let sequential = false;
   let keepTemp = false;
+  let mode: HarnessMode = "in-process";
 
   for (let i = 2; i < argv.length; i += 1) {
     const token = argv[i];
@@ -112,12 +248,29 @@ function parseArgs(argv: string[]): CliOptions {
       i += 1;
       const tagArg = argv[i];
       if (tagArg) excludeTags.push(...tagArg.split(","));
-    } else if (!token.startsWith("--")) {
-      testNames.push(token);
+    } else {
+      const parsedMode = parseHarnessModeFlag(token);
+      if (parsedMode !== null) {
+        mode = parsedMode;
+      } else if (!token.startsWith("--")) {
+        testNames.push(token);
+      }
     }
   }
 
-  return { testNames, excludeTags, update, sequential, keepTemp };
+  if (update && (mode === "distributed-simulated" || mode === "lambda-local")) {
+    // The in-process renderer is the source of truth for golden baselines —
+    // the other two modes verify the contract against the same baseline,
+    // not author their own. Surfacing this at parse time saves a multi-
+    // minute render before the user notices.
+    throw new Error(
+      `regression-harness: --update is incompatible with --mode=${mode}. ` +
+        "Generate baselines with the in-process renderer (the default mode), then re-run " +
+        "without --update to verify both modes match.",
+    );
+  }
+
+  return { testNames, excludeTags, update, sequential, keepTemp, mode };
 }
 
 function validateMetadata(meta: unknown): TestMetadata {
@@ -150,15 +303,62 @@ function validateMetadata(meta: unknown): TestMetadata {
   if (typeof m.maxAudioLagWindows !== "number" || m.maxAudioLagWindows < 1) {
     throw new Error("meta.json: 'maxAudioLagWindows' must be >= 1");
   }
+  if (
+    m.maxAudioResidualRmsDb !== undefined &&
+    (typeof m.maxAudioResidualRmsDb !== "number" || !Number.isFinite(m.maxAudioResidualRmsDb))
+  ) {
+    throw new Error("meta.json: 'maxAudioResidualRmsDb' must be a finite number when present");
+  }
   if (!m.renderConfig || typeof m.renderConfig !== "object") {
     throw new Error("meta.json: 'renderConfig' must be an object");
   }
   const rc = m.renderConfig as Record<string, unknown>;
-  if (![24, 30, 60].includes(rc.fps as number)) {
-    throw new Error("meta.json: 'renderConfig.fps' must be 24, 30, or 60");
+  // Accept either a JSON number (integer fps, e.g. 30) or a JSON string
+  // (ffmpeg-style rational, e.g. "30000/1001"). Normalize both into the Fps
+  // rational shape and write it back onto the metadata object so all
+  // downstream callers can assume the structured form.
+  const fpsRaw = rc.fps;
+  const fpsParse =
+    typeof fpsRaw === "number" || typeof fpsRaw === "string"
+      ? parseFps(fpsRaw)
+      : ({ ok: false, reason: "not-a-number" } as const);
+  if (!fpsParse.ok) {
+    throw new Error(
+      `meta.json: 'renderConfig.fps' must be an integer (e.g. 30) or rational string (e.g. "30000/1001"); got ${JSON.stringify(
+        fpsRaw,
+      )}`,
+    );
   }
-  if (rc.format !== undefined && rc.format !== "mp4" && rc.format !== "webm") {
-    throw new Error("meta.json: 'renderConfig.format' must be 'mp4' or 'webm' (or omit for mp4)");
+  rc.fps = fpsParse.value;
+  if (
+    rc.format !== undefined &&
+    rc.format !== "mp4" &&
+    rc.format !== "webm" &&
+    rc.format !== "mov" &&
+    rc.format !== "png-sequence"
+  ) {
+    throw new Error(
+      "meta.json: 'renderConfig.format' must be 'mp4', 'webm', 'mov', or 'png-sequence' (or omit for mp4)",
+    );
+  }
+  if (rc.codec !== undefined && rc.codec !== "h264" && rc.codec !== "h265") {
+    throw new Error(
+      "meta.json: 'renderConfig.codec' must be 'h264' or 'h265' (or omit for the format's default)",
+    );
+  }
+  // Normalize the implicit default before comparing so a fixture that
+  // omits `format` (which defaults to "mp4" everywhere downstream) doesn't
+  // get accidentally treated as "format is missing, so codec is illegal."
+  // The previous formulation `rc.format !== undefined && rc.format !== "mp4"`
+  // worked but relied on the reader knowing the default; this reads the
+  // intent more directly.
+  const effectiveFormat = (rc.format as string | undefined) ?? "mp4";
+  if (rc.codec !== undefined && effectiveFormat !== "mp4") {
+    throw new Error(
+      `meta.json: 'renderConfig.codec' is only valid for format='mp4' (got format=${JSON.stringify(
+        rc.format,
+      )})`,
+    );
   }
   if (rc.workers !== undefined) {
     if (typeof rc.workers !== "number" || rc.workers < 1) {
@@ -174,6 +374,20 @@ function validateMetadata(meta: unknown): TestMetadata {
   ) {
     throw new Error("meta.json: 'renderConfig.variables' must be a JSON object (or omitted)");
   }
+  if (rc.chunkSize !== undefined) {
+    if (!Number.isInteger(rc.chunkSize) || (rc.chunkSize as number) < 1) {
+      throw new Error(
+        "meta.json: 'renderConfig.chunkSize' must be a positive integer (or omitted)",
+      );
+    }
+  }
+  if (rc.maxParallelChunks !== undefined) {
+    if (!Number.isInteger(rc.maxParallelChunks) || (rc.maxParallelChunks as number) < 1) {
+      throw new Error(
+        "meta.json: 'renderConfig.maxParallelChunks' must be a positive integer (or omitted)",
+      );
+    }
+  }
 
   return m as TestMetadata;
 }
@@ -187,63 +401,91 @@ function discoverTestSuites(
     throw new Error(`Tests directory not found: ${testsDir}`);
   }
 
-  const entries = readdirSync(testsDir);
   const suites: TestSuite[] = [];
 
-  for (const entry of entries) {
-    const dir = join(testsDir, entry);
-    if (!statSync(dir).isDirectory()) continue;
-    if (entry === "node_modules" || entry.startsWith(".")) continue;
-
-    // If filter is specified, skip non-matching tests
-    if (filterNames.length > 0 && !filterNames.includes(entry)) {
-      continue;
-    }
+  // Validate + push a single candidate fixture directory. Logs the reason
+  // and returns silently if the directory doesn't look like a fixture, so
+  // callers can blindly hand over every candidate.
+  const tryAddSuite = (id: string, dir: string): void => {
+    if (filterNames.length > 0 && !filterNames.includes(id)) return;
 
     const srcDir = join(dir, "src");
     const metaPath = join(dir, "meta.json");
 
-    // Validate structure
     if (!existsSync(srcDir) || !statSync(srcDir).isDirectory()) {
-      console.warn(`⚠️  Skipping ${entry}: missing src/ directory`);
-      continue;
+      console.warn(`⚠️  Skipping ${id}: missing src/ directory`);
+      return;
     }
     if (!existsSync(join(srcDir, "index.html"))) {
-      console.warn(`⚠️  Skipping ${entry}: missing src/index.html`);
-      continue;
+      console.warn(`⚠️  Skipping ${id}: missing src/index.html`);
+      return;
     }
     if (!existsSync(metaPath)) {
-      console.warn(`⚠️  Skipping ${entry}: missing meta.json`);
-      continue;
+      console.warn(`⚠️  Skipping ${id}: missing meta.json`);
+      return;
     }
 
-    // Parse and validate meta.json
     let meta: TestMetadata;
     try {
       const metaRaw = JSON.parse(readFileSync(metaPath, "utf-8"));
       meta = validateMetadata(metaRaw);
     } catch (error) {
       console.warn(
-        `⚠️  Skipping ${entry}: invalid meta.json - ${error instanceof Error ? error.message : String(error)}`,
+        `⚠️  Skipping ${id}: invalid meta.json - ${error instanceof Error ? error.message : String(error)}`,
       );
-      continue;
+      return;
     }
 
-    // Skip tests with excluded tags
     if (excludeTags.length > 0 && meta.tags.some((t) => excludeTags.includes(t))) {
       logPretty(
-        `Skipping ${entry}: excluded by tags [${meta.tags.filter((t) => excludeTags.includes(t)).join(", ")}]`,
+        `Skipping ${id}: excluded by tags [${meta.tags.filter((t) => excludeTags.includes(t)).join(", ")}]`,
         "⏭️",
       );
+      return;
+    }
+
+    suites.push({ id, dir, srcDir, meta });
+  };
+
+  for (const entry of readdirSync(testsDir)) {
+    const dir = join(testsDir, entry);
+    if (!statSync(dir).isDirectory()) continue;
+    if (entry === "node_modules" || entry.startsWith(".")) continue;
+
+    // `tests/distributed/<name>/` holds fixtures authored for the
+    // distributed pipeline. Recurse one level deeper so each `<name>`
+    // becomes a first-class fixture ID the user can target on the CLI
+    // without a namespace prefix.
+    if (entry === "distributed") {
+      for (const sub of readdirSync(dir)) {
+        const subDir = join(dir, sub);
+        if (!statSync(subDir).isDirectory()) continue;
+        if (sub === "node_modules" || sub.startsWith(".")) continue;
+        tryAddSuite(sub, subDir);
+      }
       continue;
     }
 
-    suites.push({
-      id: entry,
-      dir,
-      srcDir,
-      meta,
-    });
+    tryAddSuite(entry, dir);
+  }
+
+  // CLI filter, failures/ output, baselines, and the suite summary all key
+  // off `suite.id`. If a future fixture lands at `tests/distributed/<x>/`
+  // while a top-level `tests/<x>/` already exists they would silently
+  // collide: both pushed with the same `id`, both running under one name,
+  // and the second to write `failures/` overwrites the first. Fail fast
+  // here naming both source dirs so the conflict is fixable at author time.
+  const seen = new Map<string, string>();
+  for (const suite of suites) {
+    const prior = seen.get(suite.id);
+    if (prior !== undefined) {
+      throw new Error(
+        `[regression-harness] duplicate fixture id ${JSON.stringify(suite.id)}: ` +
+          `${prior} and ${suite.dir}. Rename one of the directories so the CLI ` +
+          `--filter, failures/ output, and summary key onto a single suite.`,
+      );
+    }
+    seen.set(suite.id, suite.dir);
   }
 
   return suites;
@@ -378,13 +620,12 @@ function saveFailureDetails(
   result: TestResult,
   renderedVideoPath: string,
   snapshotVideoPath: string,
+  effectiveMinPsnr: number,
   compiledHtml?: string,
   snapshotHtml?: string,
 ): void {
   const failuresDir = join(suite.dir, "failures");
-  if (!existsSync(failuresDir)) {
-    mkdirSync(failuresDir, { recursive: true });
-  }
+  mkdirSync(failuresDir, { recursive: true });
 
   // Save compilation failures
   if (result.compilation && !result.compilation.passed) {
@@ -420,12 +661,13 @@ function saveFailureDetails(
       summary: {
         totalCheckpoints: result.visual.checkpoints.length,
         failedCheckpoints: failedCheckpoints.length,
-        threshold: suite.meta.minPsnr,
+        threshold: effectiveMinPsnr,
+        fixtureThreshold: suite.meta.minPsnr,
       },
       failedFrames: failedCheckpoints.map((c) => ({
         time: c.time,
         psnr: c.psnr,
-        belowThresholdBy: suite.meta.minPsnr - c.psnr,
+        belowThresholdBy: effectiveMinPsnr - c.psnr,
       })),
     };
 
@@ -435,31 +677,69 @@ function saveFailureDetails(
       "utf-8",
     );
 
-    // Extract images for first 10 failed frames
+    // Extract images for first 10 failed frames. png-sequence outputs are
+    // already directories of PNGs — copy the failing frames directly instead
+    // of running ffmpeg's PSNR frame-selector on a directory (which would
+    // throw "Invalid data found when processing input").
     const framesToExtract = failedCheckpoints.slice(0, 10);
     if (framesToExtract.length > 0) {
       const framesDir = join(failuresDir, "frames");
-      if (!existsSync(framesDir)) {
-        mkdirSync(framesDir, { recursive: true });
-      }
+      mkdirSync(framesDir, { recursive: true });
 
+      const renderedIsDir =
+        existsSync(renderedVideoPath) && statSync(renderedVideoPath).isDirectory();
       logPretty(`Extracting ${framesToExtract.length} failed frames...`, "📸");
+
+      // For directory output, sort both frame lists once — they're static for
+      // the duration of the failure-extraction loop, so the per-checkpoint
+      // readdir+filter+sort the loop did before was wasted syscalls.
+      const renderedDirFrames = renderedIsDir
+        ? readdirSync(renderedVideoPath)
+            .filter((n) => n.toLowerCase().endsWith(".png"))
+            .sort()
+        : null;
+      const snapshotDirFrames = renderedIsDir
+        ? readdirSync(snapshotVideoPath)
+            .filter((n) => n.toLowerCase().endsWith(".png"))
+            .sort()
+        : null;
 
       for (const checkpoint of framesToExtract) {
         const timeStr = checkpoint.time.toFixed(2).replace(".", "_");
         try {
-          extractFrameAsImage(
-            renderedVideoPath,
-            checkpoint.time,
-            join(framesDir, `actual_${timeStr}s.png`),
-            suite.meta.renderConfig.fps,
-          );
-          extractFrameAsImage(
-            snapshotVideoPath,
-            checkpoint.time,
-            join(framesDir, `expected_${timeStr}s.png`),
-            suite.meta.renderConfig.fps,
-          );
+          if (renderedDirFrames && snapshotDirFrames) {
+            const frameIndex = Math.max(
+              0,
+              Math.round(checkpoint.time * fpsToNumber(suite.meta.renderConfig.fps)),
+            );
+            const renderedFrame = renderedDirFrames[frameIndex];
+            const snapshotFrame = snapshotDirFrames[frameIndex];
+            if (renderedFrame !== undefined) {
+              copyFileSync(
+                join(renderedVideoPath, renderedFrame),
+                join(framesDir, `actual_${timeStr}s.png`),
+              );
+            }
+            if (snapshotFrame !== undefined) {
+              copyFileSync(
+                join(snapshotVideoPath, snapshotFrame),
+                join(framesDir, `expected_${timeStr}s.png`),
+              );
+            }
+          } else {
+            extractFrameAsImage(
+              renderedVideoPath,
+              checkpoint.time,
+              join(framesDir, `actual_${timeStr}s.png`),
+              fpsToNumber(suite.meta.renderConfig.fps),
+            );
+            extractFrameAsImage(
+              snapshotVideoPath,
+              checkpoint.time,
+              join(framesDir, `expected_${timeStr}s.png`),
+              fpsToNumber(suite.meta.renderConfig.fps),
+            );
+          }
         } catch {
           logPretty(`  Warning: Could not extract frame at ${checkpoint.time}s`, "⚠️");
         }
@@ -471,16 +751,29 @@ function saveFailureDetails(
 
   // Save audio failures
   if (result.audio && !result.audio.passed) {
+    const residualRmsDb = result.audio.residualRmsDb;
+    const residualError = result.audio.residualError;
+    const residualThreshold = suite.meta.maxAudioResidualRmsDb;
+    const residualExceeds =
+      residualThreshold !== undefined &&
+      typeof residualRmsDb === "number" &&
+      Number.isFinite(residualRmsDb) &&
+      residualRmsDb > residualThreshold;
     const audioReport = {
       summary: {
         correlation: result.audio.correlation,
         lagWindows: result.audio.lagWindows,
         threshold: suite.meta.minAudioCorrelation,
         maxLagWindows: suite.meta.maxAudioLagWindows,
+        ...(residualRmsDb !== undefined ? { residualRmsDb } : {}),
+        ...(residualThreshold !== undefined ? { residualThreshold } : {}),
+        ...(residualError ? { residualError } : {}),
       },
       analysis: {
         correlationBelowThreshold: result.audio.correlation < suite.meta.minAudioCorrelation,
         lagExceedsLimit: Math.abs(result.audio.lagWindows) > suite.meta.maxAudioLagWindows,
+        residualExceedsThreshold: residualExceeds,
+        residualCheckFailed: residualError !== undefined,
       },
     };
 
@@ -501,6 +794,7 @@ async function runTestSuite(
   options: {
     update: boolean;
     keepTemp: boolean;
+    mode: HarnessMode;
   },
 ): Promise<TestResult> {
   // Use predictable temp location: /tmp/hyperframes-tests/{test-id}/
@@ -517,13 +811,31 @@ async function runTestSuite(
 
   const tempDownloadDir = join(tempRoot, "downloads");
   const outputFormat = suite.meta.renderConfig.format ?? "mp4";
-  const videoExt = outputFormat === "webm" ? ".webm" : ".mp4";
-  const renderedOutputPath = join(tempRoot, `output${videoExt}`);
+  const isPngSequence = outputFormat === "png-sequence";
+  // png-sequence output is a directory (basename = "frames"); encoded video
+  // formats produce a single file (basename = "output.<ext>"). One lookup
+  // covers both shapes for the in-temp render and the on-disk baseline.
+  // `VIDEO_EXT` is intentionally typed against only the encoded-video set —
+  // the `isPngSequence` ternary below short-circuits before `outputFormat`
+  // can be `"png-sequence"`, but TS can't narrow through that, so we
+  // assert the narrowing at the indexing site rather than over-widening
+  // the lookup table.
+  const VIDEO_EXT: Record<"mp4" | "mov" | "webm", string> = {
+    mp4: ".mp4",
+    mov: ".mov",
+    webm: ".webm",
+  };
+  const outputBasename = isPngSequence
+    ? "frames"
+    : `output${VIDEO_EXT[outputFormat as "mp4" | "mov" | "webm"]}`;
+  const renderedOutputPath = join(tempRoot, outputBasename);
 
-  // Snapshot files stored in test's output/ directory
+  // Snapshot files stored in test's output/ directory. For png-sequence the
+  // baseline lives at `output/frames/<frame-N>.png`; for video formats it's
+  // a single `output/output.<ext>` file.
   const snapshotDir = join(suite.dir, "output");
   const snapshotCompiledPath = join(snapshotDir, "compiled.html");
-  const snapshotVideoPath = join(snapshotDir, `output${videoExt}`);
+  const snapshotVideoPath = join(snapshotDir, outputBasename);
 
   console.log(JSON.stringify({ event: "test_start", suite: suite.id, name: suite.meta.name }));
   logPretty(`Running test: ${suite.meta.name}`, "🧪");
@@ -600,25 +912,75 @@ async function runTestSuite(
     }
 
     // STEP 2: Render video
-    console.log(JSON.stringify({ event: "rendering_start", suite: suite.id }));
-    logPretty("Rendering video...", "🎬");
+    console.log(JSON.stringify({ event: "rendering_start", suite: suite.id, mode: options.mode }));
+    logPretty(`Rendering video (mode=${options.mode})...`, "🎬");
 
     const tempSrcDir = join(tempRoot, "src");
     copyFixtureSupportFiles(suite, tempRoot);
     cpSync(suite.srcDir, tempSrcDir, { recursive: true });
 
-    const job = createRenderJob({
-      fps: suite.meta.renderConfig.fps,
-      quality: "high", // Always use max quality for tests
-      format: outputFormat,
-      workers: suite.meta.renderConfig.workers,
-      useGpu: false,
-      debug: false,
-      hdrMode: suite.meta.renderConfig.hdr ? "force-hdr" : "force-sdr",
-      variables: suite.meta.renderConfig.variables,
-    });
+    if (options.mode === "distributed-simulated" || options.mode === "lambda-local") {
+      const support = checkDistributedSupport(suite.meta.renderConfig);
+      if (!support.supported) {
+        // Skipping is a clean outcome — the distributed pipeline (which
+        // both modes go through) can't run this fixture, but in-process
+        // mode already covers it. Mark passed so the suite summary
+        // doesn't trip CI; the `skipped` field is what distinguishes a
+        // real pass from a skip.
+        console.log(
+          JSON.stringify({
+            event: "test_skipped",
+            suite: suite.id,
+            mode: options.mode,
+            reason: support.reason,
+          }),
+        );
+        logPretty(`Skipping ${suite.meta.name} (mode=${options.mode}): ${support.reason}`, "⏭️");
+        result.passed = true;
+        result.skipped = { reason: support.reason };
+        return result;
+      }
+      // `checkDistributedSupport` already narrowed fps to {24,30,60}; the
+      // cast surfaces that guarantee to TS. webm is now distributed-
+      // supported via closed-GOP concat-copy, so the format passes through.
+      const fpsNum = suite.meta.renderConfig.fps.num as 24 | 30 | 60;
+      const distributedInput = {
+        projectDir: tempSrcDir,
+        tempRoot,
+        renderedOutputPath,
+        fps: fpsNum,
+        format: outputFormat,
+        codec: suite.meta.renderConfig.codec,
+        chunkSize: suite.meta.renderConfig.chunkSize,
+        maxParallelChunks: suite.meta.renderConfig.maxParallelChunks,
+        variables: suite.meta.renderConfig.variables,
+      };
+      if (options.mode === "lambda-local") {
+        const runLambdaLocalRender = await loadLambdaLocalRender();
+        // The fixture's authored dimensions live in the composition's
+        // `data-width`/`data-height` attributes, not in `meta.json`'s
+        // renderConfig. Until the harness compiles the HTML up-front
+        // to surface them here, pass 1920×1080 — the same placeholder
+        // `runDistributedSimulatedRender` uses internally. The
+        // composition attrs override at plan time.
+        await runLambdaLocalRender({ ...distributedInput, width: 1920, height: 1080 });
+      } else {
+        await runDistributedSimulatedRender(distributedInput);
+      }
+    } else {
+      const job = createRenderJob({
+        fps: suite.meta.renderConfig.fps,
+        quality: "high", // Always use max quality for tests
+        format: outputFormat,
+        workers: suite.meta.renderConfig.workers,
+        useGpu: false,
+        debug: false,
+        hdrMode: suite.meta.renderConfig.hdr ? "force-hdr" : "force-sdr",
+        variables: suite.meta.renderConfig.variables,
+      });
 
-    await executeRenderJob(job, tempSrcDir, renderedOutputPath);
+      await executeRenderJob(job, tempSrcDir, renderedOutputPath);
+    }
 
     console.log(JSON.stringify({ event: "rendering_complete", suite: suite.id }));
     logPretty("Render complete! Starting quality validation...", "✓");
@@ -628,12 +990,20 @@ async function runTestSuite(
       if (!existsSync(snapshotDir)) {
         mkdirSync(snapshotDir, { recursive: true });
       }
-      copyFileSync(renderedOutputPath, snapshotVideoPath);
+      if (isPngSequence) {
+        // Frames directory — recursive copy so every PNG lands at
+        // `<snapshotDir>/frames/<frame-N>.png`. `rmSync(..., force: true)`
+        // tolerates a missing path, so the prior existsSync gate was redundant.
+        rmSync(snapshotVideoPath, { recursive: true, force: true });
+        cpSync(renderedOutputPath, snapshotVideoPath, { recursive: true });
+      } else {
+        copyFileSync(renderedOutputPath, snapshotVideoPath);
+      }
       console.log(
         JSON.stringify({
           event: "snapshot_updated",
           suite: suite.id,
-          file: `output/output${videoExt}`,
+          file: `output/${outputBasename}`,
         }),
       );
       result.visual = { passed: true, failedFrames: 0, checkpoints: [] };
@@ -647,41 +1017,111 @@ async function runTestSuite(
       throw new Error(`Snapshot not found: ${snapshotVideoPath}. Run with --update to create it.`);
     }
 
-    // Visual comparison (100 frames, 1 per 1% of video duration)
-    logPretty("Comparing visual quality (100 checkpoints)...", "🔍");
-    const videoMetadata = await extractMediaMetadata(renderedOutputPath);
-    const snapshotMetadata = await extractMediaMetadata(snapshotVideoPath);
-    // Sample at the common duration. Container duration can drift between
-    // rendered and snapshot when encoder/mux flags change (e.g. -avoid_negative_ts
-    // can shift the first audio sample, extending reported duration without
-    // changing video frame count). Using the rendered duration alone makes the
-    // last checkpoint land on a frame index that may not exist in the snapshot,
-    // which causes ffmpeg's PSNR filter to emit no `average:` line.
-    const videoDuration = Math.min(videoMetadata.durationSeconds, snapshotMetadata.durationSeconds);
-
+    let visualPassed: boolean;
+    let failedFrames: number;
     const visualCheckpoints: Array<{ time: number; psnr: number; passed: boolean }> = [];
-    for (let i = 0; i < 100; i++) {
-      const time = (videoDuration * i) / 100;
-      const psnr = psnrAtCheckpoint(
-        renderedOutputPath,
-        snapshotVideoPath,
-        time,
-        suite.meta.renderConfig.fps,
-      );
-      visualCheckpoints.push({
-        time,
-        psnr,
-        passed: psnr >= suite.meta.minPsnr,
-      });
-
-      // Progress indicator every 20 checkpoints
-      if ((i + 1) % 20 === 0) {
-        logPretty(`  Progress: ${i + 1}/100 checkpoints`, "  ");
+    if (isPngSequence) {
+      // png-sequence visual comparison: byte-equal per frame. The renderer's
+      // png output is the raw RGBA Chrome captured, with libpng deflate
+      // applied — byte-identical pixels round-trip to byte-identical files.
+      // Comparing whole-file SHA-256 catches both pixel drift and any
+      // metadata-chunk reorder that would also be a regression.
+      logPretty("Comparing png-sequence frames...", "🔍");
+      const renderedFrames = readdirSync(renderedOutputPath)
+        .filter((name) => name.toLowerCase().endsWith(".png"))
+        .sort();
+      const snapshotFrames = readdirSync(snapshotVideoPath)
+        .filter((name) => name.toLowerCase().endsWith(".png"))
+        .sort();
+      if (renderedFrames.length !== snapshotFrames.length) {
+        logPretty(
+          `Frame count mismatch: rendered=${renderedFrames.length}, snapshot=${snapshotFrames.length}`,
+          "✗",
+        );
+        result.visual = {
+          passed: false,
+          failedFrames: Math.abs(renderedFrames.length - snapshotFrames.length),
+          checkpoints: [],
+        };
+        result.audio = { passed: true, correlation: 1, lagWindows: 0 };
+        result.passed = false;
+        return result;
       }
-    }
+      failedFrames = 0;
+      const fpsForLog = fpsToNumber(suite.meta.renderConfig.fps);
+      for (let i = 0; i < renderedFrames.length; i++) {
+        const renderedFrameName = renderedFrames[i];
+        const snapshotFrameName = snapshotFrames[i];
+        // Defensive: TypeScript's strict-mode index returns `string | undefined`
+        // even though we just length-checked. Skip with a failure if the
+        // filename ever comes back undefined.
+        if (renderedFrameName === undefined || snapshotFrameName === undefined) {
+          failedFrames++;
+          continue;
+        }
+        const renderedBytes = readFileSync(join(renderedOutputPath, renderedFrameName));
+        const snapshotBytes = readFileSync(join(snapshotVideoPath, snapshotFrameName));
+        const equal =
+          renderedFrameName === snapshotFrameName &&
+          renderedBytes.byteLength === snapshotBytes.byteLength &&
+          renderedBytes.equals(snapshotBytes);
+        visualCheckpoints.push({
+          time: i / fpsForLog,
+          // PSNR is Infinity for byte-identical frames, 0 otherwise. The
+          // existing summary code interprets psnr >= threshold as "passed"
+          // and JSON-serializes Infinity as null; both render correctly.
+          psnr: equal ? Number.POSITIVE_INFINITY : 0,
+          passed: equal,
+        });
+        if (!equal) failedFrames++;
+        if ((i + 1) % 20 === 0) {
+          logPretty(`  Progress: ${i + 1}/${renderedFrames.length} frames`, "  ");
+        }
+      }
+      visualPassed = failedFrames <= suite.meta.maxFrameFailures;
+    } else {
+      // Visual comparison (100 frames, 1 per 1% of video duration)
+      logPretty("Comparing visual quality (100 checkpoints)...", "🔍");
+      const videoMetadata = await extractMediaMetadata(renderedOutputPath);
+      const snapshotMetadata = await extractMediaMetadata(snapshotVideoPath);
+      // Sample at the common duration. Container duration can drift between
+      // rendered and snapshot when encoder/mux flags change (e.g. -avoid_negative_ts
+      // can shift the first audio sample, extending reported duration without
+      // changing video frame count). Using the rendered duration alone makes the
+      // last checkpoint land on a frame index that may not exist in the snapshot,
+      // which causes ffmpeg's PSNR filter to emit no `average:` line.
+      const videoDuration = Math.min(
+        videoMetadata.durationSeconds,
+        snapshotMetadata.durationSeconds,
+      );
+      const fps = fpsToNumber(suite.meta.renderConfig.fps);
+      // Container duration includes audio padding past the last video frame
+      // (e.g. many-cuts: 5.654s container vs 5.6s of video). At i=99 the
+      // raw container duration maps to a frame index past nb_frames, and
+      // ffmpeg's PSNR filter emits no `average:` line for a non-existent
+      // frame. Subtract one frame interval so the last checkpoint always
+      // lands on a frame the video stream actually contains.
+      const sampleDuration = Math.max(0, videoDuration - 1 / fps);
 
-    const failedFrames = visualCheckpoints.filter((c) => !c.passed).length;
-    const visualPassed = failedFrames <= suite.meta.maxFrameFailures;
+      const minPsnrForMode = resolveMinPsnrForMode(options.mode, suite.meta.minPsnr);
+      for (let i = 0; i < 100; i++) {
+        const time = (sampleDuration * i) / 100;
+        const psnr = psnrAtCheckpoint(renderedOutputPath, snapshotVideoPath, time, fps);
+        visualCheckpoints.push({
+          time,
+          psnr,
+          passed: psnr >= minPsnrForMode,
+        });
+
+        // Progress indicator every 20 checkpoints
+        if ((i + 1) % 20 === 0) {
+          logPretty(`  Progress: ${i + 1}/100 checkpoints`, "  ");
+        }
+      }
+
+      failedFrames = visualCheckpoints.filter((c) => !c.passed).length;
+      visualPassed = failedFrames <= suite.meta.maxFrameFailures;
+    }
 
     result.visual = {
       passed: visualPassed,
@@ -711,32 +1151,60 @@ async function runTestSuite(
       );
     }
 
-    // Audio comparison
-    logPretty("Comparing audio quality...", "🔊");
-    const renderedAudio = extractMonoPcm16(renderedOutputPath);
-    const snapshotAudio = extractMonoPcm16(snapshotVideoPath);
-
+    // Audio comparison. png-sequence outputs are frame directories with no
+    // audio channel — there's nothing to compare, so we report pass and
+    // skip the envelope correlation entirely.
     let audioPassed = true;
     let audioCorrelation = 1;
     let audioLagWindows = 0;
+    let audioResidualRmsDb: number | null = null;
+    let audioResidualError: string | undefined;
 
-    if (renderedAudio.length > 0 && snapshotAudio.length > 0) {
-      const renderedEnvelope = buildRmsEnvelope(renderedAudio);
-      const snapshotEnvelope = buildRmsEnvelope(snapshotAudio);
-      const audio = compareAudioEnvelopes(
-        renderedEnvelope,
-        snapshotEnvelope,
-        suite.meta.maxAudioLagWindows,
-      );
-      audioCorrelation = audio.correlation;
-      audioLagWindows = audio.lagWindows;
-      audioPassed = audio.correlation >= suite.meta.minAudioCorrelation;
+    if (!isPngSequence) {
+      logPretty("Comparing audio quality...", "🔊");
+      const renderedAudio = extractMonoPcm16(renderedOutputPath);
+      const snapshotAudio = extractMonoPcm16(snapshotVideoPath);
+
+      if (renderedAudio.length > 0 && snapshotAudio.length > 0) {
+        const renderedEnvelope = buildRmsEnvelope(renderedAudio);
+        const snapshotEnvelope = buildRmsEnvelope(snapshotAudio);
+        const audio = compareAudioEnvelopes(
+          renderedEnvelope,
+          snapshotEnvelope,
+          suite.meta.maxAudioLagWindows,
+        );
+        audioCorrelation = audio.correlation;
+        audioLagWindows = audio.lagWindows;
+        audioPassed = audio.correlation >= suite.meta.minAudioCorrelation;
+
+        // Sample-level residual-RMS check (complementary to the
+        // envelope-correlation gate above). Only runs when the fixture
+        // opts in via `maxAudioResidualRmsDb`; the correlation gate
+        // stays in place either way for legacy fixtures. Correlation
+        // measures shape similarity at envelope granularity; residual
+        // RMS measures sample-level cancellation — both surface
+        // different drift classes.
+        if (suite.meta.maxAudioResidualRmsDb !== undefined) {
+          const residual = computeAudioResidualRmsDb(
+            renderedOutputPath,
+            snapshotVideoPath,
+            suite.meta.maxAudioResidualRmsDb,
+          );
+          audioResidualRmsDb = residual.overallDb;
+          audioResidualError = residual.error;
+          if (!residual.ok) {
+            audioPassed = false;
+          }
+        }
+      }
     }
 
     result.audio = {
       passed: audioPassed,
       correlation: audioCorrelation,
       lagWindows: audioLagWindows,
+      ...(audioResidualRmsDb !== null ? { residualRmsDb: audioResidualRmsDb } : {}),
+      ...(audioResidualError ? { residualError: audioResidualError } : {}),
     };
 
     console.log(
@@ -746,17 +1214,20 @@ async function runTestSuite(
         passed: audioPassed,
         correlation: audioCorrelation,
         lagWindows: audioLagWindows,
+        residualRmsDb: audioResidualRmsDb,
+        residualError: audioResidualError,
       }),
     );
 
+    const residualSuffix = formatResidualSuffix(audioResidualRmsDb, audioResidualError);
     if (audioPassed) {
       logPretty(
-        `Audio quality: PASSED (correlation: ${audioCorrelation.toFixed(3)}, lag: ${audioLagWindows})`,
+        `Audio quality: PASSED (correlation: ${audioCorrelation.toFixed(3)}, lag: ${audioLagWindows}${residualSuffix})`,
         "✓",
       );
     } else {
       logPretty(
-        `Audio quality: FAILED (correlation: ${audioCorrelation.toFixed(3)}, threshold: ${suite.meta.minAudioCorrelation})`,
+        `Audio quality: FAILED (correlation: ${audioCorrelation.toFixed(3)}, threshold: ${suite.meta.minAudioCorrelation}${residualSuffix})`,
         "✗",
       );
     }
@@ -794,6 +1265,7 @@ async function runTestSuite(
           result,
           renderedOutputPath,
           snapshotVideoPath,
+          resolveMinPsnrForMode(options.mode, suite.meta.minPsnr),
           compiledHtml,
           snapshotHtml,
         );
@@ -836,11 +1308,13 @@ async function run(): Promise<void> {
       event: "test_suite_start",
       totalSuites: suites.length,
       parallel: !options.sequential,
+      mode: options.mode,
     }),
   );
 
   logPretty(
-    `Starting ${suites.length} test suite(s) - ${options.sequential ? "sequential" : "parallel"} mode`,
+    `Starting ${suites.length} test suite(s) - ${options.sequential ? "sequential" : "parallel"} mode, ` +
+      `harness mode=${options.mode}`,
     "🚀",
   );
 
@@ -904,7 +1378,8 @@ async function run(): Promise<void> {
     );
     logPretty(`Updated ${results.length} snapshot(s)`, "📸");
   } else {
-    const passed = results.filter((r) => r.passed).length;
+    const skipped = results.filter((r) => r.skipped).length;
+    const passed = results.filter((r) => r.passed && !r.skipped).length;
     const failed = results.filter((r) => !r.passed).length;
     const failedAtCompilation = results.filter(
       (r) => r.compilation && !r.compilation.passed,
@@ -918,6 +1393,8 @@ async function run(): Promise<void> {
         total: results.length,
         passed,
         failed,
+        skipped,
+        mode: options.mode,
         failedAtCompilation,
         failedAtVisual,
         failedAtAudio,
@@ -925,6 +1402,7 @@ async function run(): Promise<void> {
           suite: r.suite.id,
           name: r.suite.meta.name,
           passed: r.passed,
+          skipped: r.skipped?.reason,
           compilation: r.compilation?.passed,
           visual: r.visual?.passed,
           audio: r.audio?.passed,
@@ -934,8 +1412,11 @@ async function run(): Promise<void> {
 
     // Pretty summary
     logPretty("═══════════════════════════════════════", "");
-    logPretty(`Test Suite Summary`, "📊");
-    logPretty(`Total: ${results.length} | Passed: ${passed} | Failed: ${failed}`, "");
+    logPretty(`Test Suite Summary (mode=${options.mode})`, "📊");
+    logPretty(
+      `Total: ${results.length} | Passed: ${passed} | Failed: ${failed} | Skipped: ${skipped}`,
+      "",
+    );
     if (failed > 0) {
       logPretty(`  Failed at compilation: ${failedAtCompilation}`, "");
       logPretty(`  Failed at visual: ${failedAtVisual}`, "");

@@ -35,6 +35,21 @@ describe("composition rules", () => {
       expect(finding).toBeUndefined();
     });
 
+    it("does not count inline style block internals as structural lines", () => {
+      const style = `<style>\n${Array.from({ length: 320 }, (_, i) => `.rule-${i} { color: red; }`).join("\n")}\n</style>`;
+      const html = `<!doctype html>
+<html>
+  <head>${style}</head>
+  <body>
+    <div data-composition-id="main" data-start="0" data-duration="1">TEXT</div>
+  </body>
+</html>`;
+
+      const result = lintHyperframeHtml(html, { filePath: "/project/index.html" });
+      const finding = result.findings.find((f) => f.code === "composition_file_too_large");
+      expect(finding).toBeUndefined();
+    });
+
     it("does not warn for large registry source block files", () => {
       const html = Array.from({ length: 301 }, (_, i) =>
         i === 0 ? "<html><body>" : `<!-- filler ${i} -->`,
@@ -754,6 +769,52 @@ describe("composition rules", () => {
       const finding = result.findings.find(
         (f) => f.code === "invalid_composition_variables_declaration",
       );
+      expect(finding).toBeUndefined();
+    });
+  });
+
+  describe("invalid_capture_path", () => {
+    it("errors when an <img> src uses ../capture/", () => {
+      const html = `<html><body>
+        <div data-composition-id="x">
+          <img src="../capture/assets/logo.svg" alt="logo">
+        </div>
+      </body></html>`;
+      const result = lintHyperframeHtml(html, {
+        filePath: "/project/compositions/scene.html",
+      });
+      const finding = result.findings.find((f) => f.code === "invalid_capture_path");
+      expect(finding).toBeDefined();
+      expect(finding?.severity).toBe("error");
+    });
+
+    it("errors when a CSS url() uses ../capture/ (counts all occurrences)", () => {
+      const html = `<html><body>
+        <style>
+          @font-face { font-family: 'Brand'; src: url('../capture/assets/fonts/Brand.woff2'); }
+          .hero { background-image: url('../capture/assets/hero.png'); }
+        </style>
+        <div data-composition-id="x"></div>
+      </body></html>`;
+      const result = lintHyperframeHtml(html, {
+        filePath: "/project/compositions/scene.html",
+      });
+      const finding = result.findings.find((f) => f.code === "invalid_capture_path");
+      expect(finding).toBeDefined();
+      expect(finding?.message).toContain("2 asset path(s)");
+    });
+
+    it("does not flag root-relative capture/ paths", () => {
+      const html = `<html><body>
+        <div data-composition-id="x">
+          <img src="capture/assets/logo.svg" alt="logo">
+        </div>
+        <style>.hero { background-image: url('capture/assets/hero.png'); }</style>
+      </body></html>`;
+      const result = lintHyperframeHtml(html, {
+        filePath: "/project/compositions/scene.html",
+      });
+      const finding = result.findings.find((f) => f.code === "invalid_capture_path");
       expect(finding).toBeUndefined();
     });
   });

@@ -1,5 +1,13 @@
 name: Catalog Previews
 
+permissions:
+  contents: read
+
+# Suppress hyperframes CLI telemetry from HeyGen's own CI runs.
+# External users' CI continues to emit telemetry unless they set this themselves.
+env:
+  HYPERFRAMES_NO_TELEMETRY: "1"
+
 on:
   pull_request:
     branches: [main]
@@ -14,8 +22,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  preflight:
+    name: Preflight (lint + format)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: ./.github/actions/preflight
+
   render-previews:
     name: Render catalog previews
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -39,9 +56,10 @@ jobs:
           chrome-version: stable
 
       - name: Render changed block/component previews
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # Find which blocks/components changed in this PR
-          BASE_SHA=${{ github.event.pull_request.base.sha }}
           CHANGED_ITEMS=$(git diff --name-only --diff-filter=ACMR "$BASE_SHA"...HEAD -- registry/blocks/ registry/components/ \
             | grep -E '^registry/(blocks|components)/' \
             | sed 's|^registry/[^/]*/\([^/]*\)/.*|\1|' \

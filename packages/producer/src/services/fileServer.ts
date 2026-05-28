@@ -15,7 +15,7 @@ import { join, extname, resolve, sep } from "node:path";
 import { injectScriptsAtHeadStart, injectScriptsIntoHtml } from "@hyperframes/core/compiler";
 import { getVerifiedHyperframeRuntimeSource } from "./hyperframeRuntimeLoader.js";
 
-export { injectScriptsAtHeadStart, injectScriptsIntoHtml };
+export { injectScriptsAtHeadStart };
 
 type PathModuleLike = {
   resolve: (...segments: string[]) => string;
@@ -92,7 +92,96 @@ const MIME_TYPES: Record<string, string> = {
   ".otf": "font/otf",
 };
 
-const VIRTUAL_TIME_SHIM = String.raw`(function() {
+/**
+ * Options for {@link buildVirtualTimeShim}.
+ */
+export interface VirtualTimeShimOptions {
+  /**
+   * When `true`, the shim additionally replaces `Math.random` and
+   * `crypto.getRandomValues` with a Mulberry32-seeded PRNG keyed by the
+   * current frame's virtual time. Compositions that call `Math.random()`
+   * during render then produce byte-identical pixels across machines and
+   * across replays of the same `(planDir, chunkIndex)` pair.
+   *
+   * Default `false`: leaves `Math.random` / `crypto.getRandomValues` native,
+   * preserving the in-process renderer's non-deterministic behavior for
+   * compositions that rely on it.
+   */
+  seedRandomFromFrame: boolean;
+}
+
+/**
+ * Build the page-side virtual-time shim script.
+ *
+ * The shim freezes `Date.now`, `performance.now`, and the rAF/setTimeout
+ * pipeline so a render seek can deterministically advance the page's
+ * notion of "now". The renderer issues `__HF_VIRTUAL_TIME__.seekToTime(ms)`
+ * before every frame capture; everything timing-related on the page sees
+ * exactly `ms` until the next seek.
+ *
+ * When `options.seedRandomFromFrame` is `true`, the returned script also
+ * installs a seeded `Math.random` / `crypto.getRandomValues` keyed by the
+ * current virtual time — so compositions with stochastic visuals retry
+ * identically. When `false`, the shim emits no random-override code; the
+ * page's native `Math.random` is left alone (the in-process default).
+ */
+export function buildVirtualTimeShim(options: VirtualTimeShimOptions): string {
+  const seedRandomFromFrame = options.seedRandomFromFrame === true;
+  // The seeded-RNG block is gated at build time so the unlocked shim is
+  // byte-identical to the pre-flag form. Producer regression baselines
+  // compare on rendered pixels — but the file-server unit tests in
+  // `fileServer.test.ts` also string-match `VIRTUAL_TIME_SHIM`, and we want
+  // those matches to remain stable.
+  const seededRandomBlock = seedRandomFromFrame
+    ? String.raw`
+  // Seeded Math.random / crypto.getRandomValues, keyed by virtual time.
+  // Mulberry32 — single uint32 state, deterministic, fast.
+  var rngState = 0;
+  function mulberry32() {
+    rngState |= 0; rngState = (rngState + 0x6D2B79F5) | 0;
+    var t = rngState;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  function reseedRngFromTime(ms) {
+    var ms32 = Math.max(0, Math.floor(Number(ms) || 0)) | 0;
+    // Knuth's multiplicative hash + golden-ratio offset — gives a well-
+    // distributed seed even for frame 0 (otherwise rngState=0 degenerates
+    // the PRNG's first few outputs).
+    rngState = (Math.imul(ms32, -1640531527) + 0x9E3779B9) | 0;
+  }
+  reseedRngFromTime(0);
+  try {
+    Math.random = function() { return mulberry32(); };
+  } catch (e) {}
+  if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+    try {
+      var __seededGetRandomValues = function(arr) {
+        if (!arr || typeof arr.byteLength !== "number" || !arr.buffer) return arr;
+        var byteLen = arr.byteLength;
+        if (byteLen <= 0) return arr;
+        var view = new DataView(arr.buffer, arr.byteOffset, byteLen);
+        var i = 0;
+        for (; i + 4 <= byteLen; i += 4) {
+          var word = ((mulberry32() * 4294967296) >>> 0);
+          view.setUint32(i, word, true);
+        }
+        for (; i < byteLen; i++) {
+          view.setUint8(i, (mulberry32() * 256) | 0);
+        }
+        return arr;
+      };
+      window.crypto.getRandomValues = __seededGetRandomValues;
+    } catch (e) {}
+  }
+`
+    : "";
+  // The seekToTime hook reseeds when seeding is on; under seedRandomFromFrame=false
+  // we emit no extra call so the function body is byte-identical to the
+  // unseeded shim.
+  const seekToTimeReseedCall = seedRandomFromFrame ? "reseedRngFromTime(safeTimeMs);\n      " : "";
+  return String.raw`(function() {
   if (window.__HF_VIRTUAL_TIME__) return;
 
   var virtualNowMs = 0;
@@ -109,7 +198,7 @@ const VIRTUAL_TIME_SHIM = String.raw`(function() {
   var originalCancelAnimationFrame = window.cancelAnimationFrame
     ? window.cancelAnimationFrame.bind(window)
     : null;
-
+${seededRandomBlock}
   function flushAnimationFrame() {
     if (!rafQueue.length) return;
     var current = rafQueue.slice();
@@ -180,7 +269,7 @@ const VIRTUAL_TIME_SHIM = String.raw`(function() {
     seekToTime: function(nextTimeMs) {
       var safeTimeMs = Math.max(0, Number(nextTimeMs) || 0);
       virtualNowMs = safeTimeMs;
-      flushAnimationFrame();
+      ${seekToTimeReseedCall}flushAnimationFrame();
       return virtualNowMs;
     },
     getTime: function() {
@@ -188,6 +277,14 @@ const VIRTUAL_TIME_SHIM = String.raw`(function() {
     },
   };
 })();`;
+}
+
+/**
+ * Default in-process virtual-time shim — `seedRandomFromFrame: false`.
+ * Existing call sites (`renderOrchestrator`, `probeStage`) import this
+ * constant. Distributed callers build their own with seeding enabled.
+ */
+const VIRTUAL_TIME_SHIM = buildVirtualTimeShim({ seedRandomFromFrame: false });
 
 /**
  * Render mode extension -- adds renderSeek() for frame-accurate seeking
@@ -293,6 +390,8 @@ const RENDER_MODE_SCRIPT = `(function() {
       },
     };
     window.__playerReady = true;
+    // Media-fallback player has no timeline to bind, so render-ready is immediate.
+    // init.ts defers __renderReady until the timeline is bound — different runtime.
     window.__renderReady = true;
     return true;
   }
@@ -329,6 +428,29 @@ const RENDER_MODE_SCRIPT = `(function() {
 const HF_EARLY_STUB = `(function() {
   if (typeof window === "undefined") return;
   if (!window.__hf) window.__hf = {};
+})();`;
+
+/**
+ * Page-side compositing opt-in flag stub.
+ *
+ * When the engine is launched with `enablePageSideCompositing: true`, the
+ * orchestrator injects this stub into the very top of every served HTML
+ * page. The flag is read by `@hyperframes/shader-transitions`' engine-mode
+ * `init()` to switch from the default opacity-flip mode (which leaves
+ * shader blending to the Node side via the hf#677 layered pipeline) to a
+ * page-side WebGL compositor that runs the shader inside Chrome and
+ * exposes a single opaque RGB frame for the engine to capture.
+ *
+ * Sentinel ONLY — no logic here. The compositor itself ships inside
+ * `@hyperframes/shader-transitions` and is loaded by the composition's
+ * regular script bundle.
+ *
+ * Default OFF: when the flag is not set, behavior is byte-identical to
+ * the existing layered path.
+ */
+export const HF_PAGE_SIDE_COMPOSITING_STUB = `(function() {
+  if (typeof window === "undefined") return;
+  window.__HF_PAGE_SIDE_COMPOSITING__ = true;
 })();`;
 
 /**
@@ -428,6 +550,7 @@ export interface FileServerHandle {
   url: string;
   port: number;
   close: () => void;
+  addPreHeadScript: (script: string) => void;
 }
 
 export function createFileServer(options: FileServerOptions): Promise<FileServerHandle> {
@@ -534,6 +657,9 @@ export function createFileServer(options: FileServerOptions): Promise<FileServer
       resolve({
         url: `http://localhost:${info.port}`,
         port: info.port,
+        addPreHeadScript: (script: string) => {
+          preHeadScripts.push(script);
+        },
         close: () => {
           for (const socket of connections) socket.destroy();
           connections.clear();

@@ -1,4 +1,4 @@
-import type { Keyframe, KeyframeProperties } from "../core.types";
+import type { Keyframe, KeyframeProperties, ValidationResult } from "../core.types";
 
 export type GsapMethod = "set" | "to" | "from" | "fromTo";
 
@@ -342,12 +342,6 @@ export function getAnimationsForElement(
 ): GsapAnimation[] {
   const selector = `#${elementId}`;
   return animations.filter((a) => a.targetSelector === selector);
-}
-
-export interface ValidationResult {
-  valid: boolean;
-  errors: string[];
-  warnings: string[];
 }
 
 const FORBIDDEN_GSAP_PATTERNS: Array<{ pattern: RegExp; message: string }> = [

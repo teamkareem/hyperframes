@@ -40,6 +40,30 @@
       "type": "hyperframes:block"
     },
     {
+      "name": "us-map",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "us-map-bubble",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "us-map-hex",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "us-map-flow",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "world-map",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "spain-map",
+      "type": "hyperframes:block"
+    },
+    {
       "name": "flowchart",
       "type": "hyperframes:block"
     },
@@ -57,6 +81,78 @@
     },
     {
       "name": "grid-pixelate-wipe",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "texture-mask-text",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "vignette",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-pill-karaoke",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-neon-accent",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-weight-shift",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-emoji-pop",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-editorial-emphasis",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-parallax-layers",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-glitch-rgb",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-matrix-decode",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-particle-burst",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-texture",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-clip-wipe",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-kinetic-slam",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-gradient-fill",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-neon-glow",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-highlight",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "caption-blend-difference",
       "type": "hyperframes:component"
     },
     {
@@ -244,12 +340,40 @@
       "type": "hyperframes:block"
     },
     {
-      "name": "vfx-liquid-glass",
+      "name": "liquid-glass-notification",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "liquid-glass-context-menu",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "liquid-glass-media-controls",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "liquid-glass-widgets",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "ios26-liquid-glass",
+      "type": "hyperframes:block"
+    },
+    {
+      "name": "macos-tahoe-liquid-glass",
       "type": "hyperframes:block"
     },
     {
       "name": "vfx-shatter",
       "type": "hyperframes:block"
+    },
+    {
+      "name": "parallax-zoom",
+      "type": "hyperframes:component"
+    },
+    {
+      "name": "parallax-unzoom",
+      "type": "hyperframes:component"
     }
   ]
 }

@@ -36,6 +36,7 @@ import {
   executeRenderJob,
   type RenderPerfSummary,
 } from "./services/renderOrchestrator.js";
+import { parseFps } from "@hyperframes/core";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const testsDir = resolve(scriptDir, "../tests");
@@ -44,7 +45,9 @@ const perfDir = resolve(testsDir, "perf");
 interface TestMeta {
   name: string;
   tags?: string[];
-  renderConfig: { fps: 24 | 30 | 60 };
+  // Same on-disk shape as the regression harness — JSON `number` (integer
+  // fps) or JSON `string` ("30000/1001"). Normalized to Fps when loaded.
+  renderConfig: { fps: import("@hyperframes/core").Fps };
 }
 
 interface BenchmarkRun {
@@ -125,7 +128,25 @@ function discoverFixtures(
 
     if (only && entry !== only) continue;
 
-    const meta: TestMeta = JSON.parse(readFileSync(metaPath, "utf-8"));
+    const rawMeta = JSON.parse(readFileSync(metaPath, "utf-8")) as {
+      name: string;
+      tags?: string[];
+      renderConfig: { fps: number | string };
+    };
+    // meta.json on disk uses a JSON `number` for legacy integer fps values
+    // and a JSON `string` for new ffmpeg-style rationals (e.g. "30000/1001").
+    // Normalize to the Fps rational shape so downstream code only sees the
+    // structured form — same convention as the regression harness.
+    const fpsParse = parseFps(rawMeta.renderConfig.fps);
+    if (!fpsParse.ok) {
+      throw new Error(
+        `Benchmark fixture ${entry}: invalid renderConfig.fps ${JSON.stringify(rawMeta.renderConfig.fps)}`,
+      );
+    }
+    const meta: TestMeta = {
+      ...rawMeta,
+      renderConfig: { ...rawMeta.renderConfig, fps: fpsParse.value },
+    };
     const fixtureTags = meta.tags ?? [];
     // Positive filter (--tags): if provided, fixture must match at least one.
     if (tags.length > 0 && !fixtureTags.some((t) => tags.includes(t))) continue;

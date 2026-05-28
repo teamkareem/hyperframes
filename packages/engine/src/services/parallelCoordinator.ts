@@ -23,12 +23,24 @@ import {
   type BeforeCaptureHook,
 } from "./frameCapture.js";
 import { DEFAULT_CONFIG, type EngineConfig } from "../config.js";
+import { assertSwiftShader } from "../utils/assertSwiftShader.js";
+import { readWebGlVendorInfoFromCanvas } from "../utils/readWebGlVendorInfoFromCanvas.js";
+import { resolveHeadlessShellPath } from "./browserManager.js";
 
 export interface WorkerTask {
   workerId: number;
   startFrame: number;
   endFrame: number;
   outputDir: string;
+  /**
+   * Offset subtracted from the absolute frame index when naming the captured
+   * file (`frame_<i - outputFrameOffset>.{ext}`). Default 0. Distributed
+   * chunks set this to the chunk's absolute startFrame so file names land
+   * 0-indexed within the chunk's range — the encoder reads frames
+   * sequentially without an `-start_number` override. The per-frame TIME
+   * calculation still uses the absolute frame index.
+   */
+  outputFrameOffset?: number;
 }
 
 export interface WorkerResult {
@@ -64,8 +76,23 @@ export interface WorkerSizingConfig extends Partial<
 
 const MEMORY_PER_WORKER_MB = 256;
 const MIN_WORKERS = 1;
-const ABSOLUTE_MAX_WORKERS = 10;
-const DEFAULT_SAFE_MAX_WORKERS = 6;
+// Hard ceiling on explicit `--workers N` requests. Above this, the cost of
+// CDP-protocol dispatch through Node's main event loop and OS scheduling
+// noise overwhelms any further parallelism. Bumped from 10 → 24 in hf#732
+// follow-up so high-core hosts (32-96+ cores) can actually surface the
+// hardware to renders that are CPU-bound on DOM capture.
+const ABSOLUTE_MAX_WORKERS = 24;
+// `auto` concurrency picks this many workers as the upper bound. Bumped
+// from a hardcoded 6 → CPU-scaled value (floor(cpuCount/8), floor at 6,
+// ceiling at 16) in hf#732 follow-up. Rationale: the prior fixed cap of 6
+// left ~90 cores idle on the validation host and forced users to pass
+// `--workers N` to opt in. Now `auto` matches what a thoughtful operator
+// would pick by hand. The /8 divisor leaves headroom for each Chrome
+// worker's SwiftShader compositor + the shader-blend thread pool, both of
+// which are themselves CPU-heavy.
+function defaultSafeMaxWorkers(): number {
+  return Math.max(6, Math.min(16, Math.floor(cpus().length / 8)));
+}
 const MIN_FRAMES_PER_WORKER = 30;
 
 export function calculateOptimalWorkers(
@@ -79,7 +106,7 @@ export function calculateOptimalWorkers(
     if (concurrency !== "auto") {
       return Math.max(MIN_WORKERS, Math.min(ABSOLUTE_MAX_WORKERS, Math.floor(concurrency)));
     }
-    return DEFAULT_SAFE_MAX_WORKERS;
+    return defaultSafeMaxWorkers();
   })();
   const effectiveCoresPerWorker = config?.coresPerWorker ?? DEFAULT_CONFIG.coresPerWorker;
   const effectiveMinParallelFrames = config?.minParallelFrames ?? DEFAULT_CONFIG.minParallelFrames;
@@ -133,24 +160,63 @@ export function distributeFrames(
   totalFrames: number,
   workerCount: number,
   workDir: string,
+  rangeStart: number = 0,
 ): WorkerTask[] {
   const tasks: WorkerTask[] = [];
   const framesPerWorker = Math.ceil(totalFrames / workerCount);
 
   for (let i = 0; i < workerCount; i++) {
-    const startFrame = i * framesPerWorker;
-    const endFrame = Math.min((i + 1) * framesPerWorker, totalFrames);
-    if (startFrame >= totalFrames) break;
+    const startFrame = rangeStart + i * framesPerWorker;
+    const endFrame = Math.min(rangeStart + (i + 1) * framesPerWorker, rangeStart + totalFrames);
+    if (startFrame >= rangeStart + totalFrames) break;
 
     tasks.push({
       workerId: i,
       startFrame,
       endFrame,
       outputDir: join(workDir, `worker-${i}`),
+      outputFrameOffset: rangeStart,
     });
   }
 
   return tasks;
+}
+
+/**
+ * Decide whether a parallel worker should run the per-worker SwiftShader
+ * assertion. Gated to worker 0 only: workers within a chunk share the same
+ * Chrome binary, flags, and OS/driver state, so one verification per chunk
+ * is sufficient. See `heygen-com/hyperframes#955`.
+ */
+export function shouldVerifyWorkerGpu(workerId: number, config?: Partial<EngineConfig>): boolean {
+  return config?.browserGpuMode === "software" && workerId === 0;
+}
+
+async function captureFrameRange(
+  session: CaptureSession,
+  task: WorkerTask,
+  captureOptions: CaptureOptions,
+  signal: AbortSignal | undefined,
+  onFrameCaptured: ((workerId: number, frameIndex: number) => void) | undefined,
+  onFrameBuffer: ((frameIndex: number, buffer: Buffer) => Promise<void>) | undefined,
+): Promise<number> {
+  let framesCaptured = 0;
+  const outputOffset = task.outputFrameOffset ?? 0;
+  for (let i = task.startFrame; i < task.endFrame; i++) {
+    if (signal?.aborted) throw new Error("Parallel worker cancelled");
+    const time = (i * captureOptions.fps.den) / captureOptions.fps.num;
+    const fileFrameIdx = i - outputOffset;
+
+    if (onFrameBuffer) {
+      const { buffer } = await captureFrameToBuffer(session, fileFrameIdx, time);
+      await onFrameBuffer(i, buffer);
+    } else {
+      await captureFrame(session, fileFrameIdx, time);
+    }
+    framesCaptured++;
+    if (onFrameCaptured) onFrameCaptured(task.workerId, i);
+  }
+  return framesCaptured;
 }
 
 async function executeWorkerTask(
@@ -162,6 +228,7 @@ async function executeWorkerTask(
   onFrameCaptured?: (workerId: number, frameIndex: number) => void,
   onFrameBuffer?: (frameIndex: number, buffer: Buffer) => Promise<void>,
   config?: Partial<EngineConfig>,
+  parallel?: boolean,
 ): Promise<WorkerResult> {
   const startTime = Date.now();
   let framesCaptured = 0;
@@ -171,34 +238,43 @@ async function executeWorkerTask(
   let session: CaptureSession | null = null;
   let perf: CapturePerfSummary | undefined;
 
+  // BeginFrame's compositor is process-global — multiple pages driving
+  // beginFrame in the same browser race it and crash with "Target closed".
+  // Only disable the pool when BeginFrame mode would actually be active.
+  // Must match the predicate in createCaptureSession (frameCapture.ts):
+  // Linux + headless-shell + !forceScreenshot + !supersampling.
+  const supersampling = (captureOptions.deviceScaleFactor ?? 1) > 1;
+  const needsSeparateBrowsers =
+    parallel &&
+    process.platform === "linux" &&
+    !config?.forceScreenshot &&
+    !supersampling &&
+    resolveHeadlessShellPath(config) !== undefined;
+  const workerConfig: Partial<EngineConfig> | undefined = needsSeparateBrowsers
+    ? { ...config, enableBrowserPool: false }
+    : config;
+
   try {
     session = await createCaptureSession(
       serverUrl,
       task.outputDir,
       captureOptions,
       createBeforeCaptureHook(),
-      config,
+      workerConfig,
     );
-    await initializeSession(session);
-
-    for (let i = task.startFrame; i < task.endFrame; i++) {
-      if (signal?.aborted) {
-        throw new Error("Parallel worker cancelled");
-      }
-      const time = i / captureOptions.fps;
-
-      if (onFrameBuffer) {
-        // Streaming mode: capture to buffer and invoke callback
-        const { buffer } = await captureFrameToBuffer(session, i, time);
-        await onFrameBuffer(i, buffer);
-      } else {
-        // Disk mode: capture to file
-        await captureFrame(session, i, time);
-      }
-      framesCaptured++;
-
-      if (onFrameCaptured) onFrameCaptured(task.workerId, i);
+    // Worker-0-only SwiftShader assertion — see `shouldVerifyWorkerGpu` and #955.
+    if (shouldVerifyWorkerGpu(task.workerId, workerConfig)) {
+      await assertSwiftShader(session.page, readWebGlVendorInfoFromCanvas);
     }
+    await initializeSession(session);
+    framesCaptured = await captureFrameRange(
+      session,
+      task,
+      captureOptions,
+      signal,
+      onFrameCaptured,
+      onFrameBuffer,
+    );
 
     perf = getCapturePerfSummary(session);
     return {
@@ -256,6 +332,7 @@ export async function executeParallelCapture(
     }
   };
 
+  const parallel = tasks.length > 1;
   const results = await Promise.all(
     tasks.map((task) =>
       executeWorkerTask(
@@ -267,6 +344,7 @@ export async function executeParallelCapture(
         onFrameCaptured,
         onFrameBuffer,
         config,
+        parallel,
       ),
     ),
   );

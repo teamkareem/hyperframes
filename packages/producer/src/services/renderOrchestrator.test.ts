@@ -6,28 +6,33 @@ import type { EngineConfig, ExtractedFrames } from "@hyperframes/engine";
 import type { CompiledComposition } from "./htmlCompiler.js";
 
 import {
-  applyRenderModeHints,
   buildMissingFrameRetryBatches,
   collectVideoMetadataHints,
   collectVideoReadinessSkipIds,
-  createCaptureCalibrationConfig,
-  createCompiledFrameSrcResolver,
-  estimateMeasuredCaptureCostMultiplier,
-  estimateCaptureCostMultiplier,
   extractStandaloneEntryFromIndex,
   findMissingFrameRanges,
   getNextRetryWorkerCount,
   isRecoverableParallelCaptureError,
-  materializeExtractedFramesForCompiledDir,
-  projectBrowserEndToCompositionTimeline,
-  resolveRenderWorkerCount,
   resolveCompositeTransfer,
-  selectCaptureCalibrationFrames,
-  shouldFallbackToScreenshotAfterCalibrationError,
   shouldUseLayeredComposite,
   shouldUseStreamingEncode,
-  writeCompiledArtifacts,
 } from "./renderOrchestrator.js";
+import {
+  createCaptureCalibrationConfig,
+  estimateCaptureCostMultiplier,
+  estimateMeasuredCaptureCostMultiplier,
+  resolveRenderWorkerCount,
+  selectCaptureCalibrationFrames,
+  shouldFallbackToScreenshotAfterCalibrationError,
+} from "./render/captureCost.js";
+import {
+  applyRenderModeHints,
+  createCompiledFrameSrcResolver,
+  materializeExtractedFramesForCompiledDir,
+  projectBrowserEndToCompositionTimeline,
+  resolveDeviceScaleFactor,
+  writeCompiledArtifacts,
+} from "./render/shared.js";
 import { toExternalAssetKey } from "../utils/paths.js";
 
 describe("extractStandaloneEntryFromIndex", () => {
@@ -197,6 +202,9 @@ describe("materializeExtractedFramesForCompiledDir", () => {
         symlinkSync: () => {
           throw new Error("inside compiledDir should not symlink");
         },
+        cpSync: () => {
+          throw new Error("inside compiledDir should not copy");
+        },
       },
     });
 
@@ -219,6 +227,9 @@ describe("materializeExtractedFramesForCompiledDir", () => {
         symlinkSync: (target, path) => {
           symlinks.push({ target, path });
         },
+        cpSync: () => {
+          throw new Error("symlink path should not invoke cpSync");
+        },
       },
     });
 
@@ -227,6 +238,37 @@ describe("materializeExtractedFramesForCompiledDir", () => {
     expect(extracted.framePaths.get(0)).toBe(win32.join(linkPath, "frame_000001.jpg"));
     expect(extracted.framePaths.get(0)).not.toContain(outputDir);
     expect(symlinks).toEqual([{ target: outputDir, path: linkPath }]);
+  });
+
+  it("recursively copies frames into compiledDir when materializeSymlinks is true", () => {
+    // Distributed plan() must produce a self-contained planDir — symlinks
+    // don't survive S3 / GCS round-trips. With materializeSymlinks=true the
+    // helper invokes cpSync(recursive) instead of symlinkSync.
+    const compiledDir = win32.resolve("C:\\compiled");
+    const outputDir = win32.resolve("D:\\cache\\abc123");
+    const framePath = win32.join(outputDir, "frame_000001.jpg");
+    const extracted = createExtractedFrames(outputDir, framePath);
+    const copies: Array<{ src: string; dest: string; recursive: boolean }> = [];
+
+    materializeExtractedFramesForCompiledDir([extracted], compiledDir, {
+      pathModule: win32,
+      fileSystem: {
+        existsSync: () => false,
+        mkdirSync: () => undefined,
+        symlinkSync: () => {
+          throw new Error("copy path should not invoke symlinkSync");
+        },
+        cpSync: (src, dest, options) => {
+          copies.push({ src, dest, recursive: options.recursive });
+        },
+      },
+      materializeSymlinks: true,
+    });
+
+    const linkPath = win32.join(compiledDir, "__hyperframes_video_frames", "video-1");
+    expect(extracted.outputDir).toBe(linkPath);
+    expect(extracted.framePaths.get(0)).toBe(win32.join(linkPath, "frame_000001.jpg"));
+    expect(copies).toEqual([{ src: outputDir, dest: linkPath, recursive: true }]);
   });
 });
 
@@ -370,6 +412,7 @@ function createConfig(): EngineConfig {
     hdrAutoDetect: true,
     audioGain: 1,
     frameDataUriCacheLimit: 256,
+    frameDataUriCacheBytesLimitMb: 1500,
     playerReadyTimeout: 45000,
     renderReadyTimeout: 15000,
     verifyRuntime: true,
@@ -379,7 +422,6 @@ function createConfig(): EngineConfig {
 
 describe("applyRenderModeHints", () => {
   it("forces screenshot mode when compatibility hints recommend it", () => {
-    const cfg = createConfig();
     const compiled = createCompiledComposition(["iframe", "requestAnimationFrame"]);
     const log = {
       error: vi.fn(),
@@ -388,15 +430,13 @@ describe("applyRenderModeHints", () => {
       debug: vi.fn(),
     };
 
-    applyRenderModeHints(cfg, compiled, log);
+    const result = applyRenderModeHints(false, compiled, log);
 
-    expect(cfg.forceScreenshot).toBe(true);
+    expect(result).toEqual({ forceScreenshot: true, autoSelected: true });
     expect(log.warn).toHaveBeenCalledOnce();
   });
 
   it("does nothing when screenshot mode is already forced", () => {
-    const cfg = createConfig();
-    cfg.forceScreenshot = true;
     const compiled = createCompiledComposition(["iframe"]);
     const log = {
       error: vi.fn(),
@@ -405,8 +445,24 @@ describe("applyRenderModeHints", () => {
       debug: vi.fn(),
     };
 
-    applyRenderModeHints(cfg, compiled, log);
+    const result = applyRenderModeHints(true, compiled, log);
 
+    expect(result).toEqual({ forceScreenshot: true, autoSelected: false });
+    expect(log.warn).not.toHaveBeenCalled();
+  });
+
+  it("returns false when neither caller nor hint forces", () => {
+    const compiled = createCompiledComposition([]);
+    const log = {
+      error: vi.fn(),
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const result = applyRenderModeHints(false, compiled, log);
+
+    expect(result).toEqual({ forceScreenshot: false, autoSelected: false });
     expect(log.warn).not.toHaveBeenCalled();
   });
 });
@@ -503,6 +559,58 @@ describe("resolveRenderWorkerCount", () => {
     );
 
     expect(workers).toBe(1);
+  });
+
+  it("forces single worker when html-in-canvas is detected", () => {
+    const log = {
+      error: vi.fn(),
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const workers = resolveRenderWorkerCount(
+      900,
+      undefined,
+      cfg,
+      {
+        hasShaderTransitions: false,
+        renderModeHints: {
+          recommendScreenshot: false,
+          reasons: [{ code: "htmlInCanvas", message: "layoutsubtree canvas" }],
+        },
+      },
+      log,
+    );
+
+    expect(workers).toBe(1);
+    expect(log.warn).toHaveBeenCalledOnce();
+  });
+
+  it("overrides explicit --workers when html-in-canvas is detected", () => {
+    const log = {
+      error: vi.fn(),
+      warn: vi.fn(),
+      info: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    const workers = resolveRenderWorkerCount(
+      900,
+      8,
+      cfg,
+      {
+        hasShaderTransitions: false,
+        renderModeHints: {
+          recommendScreenshot: false,
+          reasons: [{ code: "htmlInCanvas", message: "layoutsubtree canvas" }],
+        },
+      },
+      log,
+    );
+
+    expect(workers).toBe(1);
+    expect(log.warn).toHaveBeenCalledOnce();
   });
 
   it("keeps baseline auto workers after screenshot fallback when measured capture is cheap", () => {
@@ -746,5 +854,128 @@ describe("projectBrowserEndToCompositionTimeline", () => {
 
   it("preserves scene-local media offsets inside compositions that start much later", () => {
     expect(projectBrowserEndToCompositionTimeline(21.5, 1.5, 5.5)).toBe(25.5);
+  });
+});
+
+describe("resolveDeviceScaleFactor", () => {
+  const defaults = {
+    compositionWidth: 1920,
+    compositionHeight: 1080,
+    hdrRequested: false,
+    alphaRequested: false,
+  } as const;
+
+  it("returns 1 when no outputResolution is set (default behavior)", () => {
+    expect(resolveDeviceScaleFactor({ ...defaults, outputResolution: undefined })).toBe(1);
+  });
+
+  it("returns 2 for the canonical 1080p → 4K supersample", () => {
+    expect(resolveDeviceScaleFactor({ ...defaults, outputResolution: "landscape-4k" })).toBe(2);
+  });
+
+  it("returns 2 for portrait 1080p → portrait-4k", () => {
+    expect(
+      resolveDeviceScaleFactor({
+        ...defaults,
+        compositionWidth: 1080,
+        compositionHeight: 1920,
+        outputResolution: "portrait-4k",
+      }),
+    ).toBe(2);
+  });
+
+  it("returns 1 when the composition already matches the requested resolution", () => {
+    expect(
+      resolveDeviceScaleFactor({
+        ...defaults,
+        compositionWidth: 3840,
+        compositionHeight: 2160,
+        outputResolution: "landscape-4k",
+      }),
+    ).toBe(1);
+  });
+
+  it("rejects HDR + outputResolution with a clear message", () => {
+    expect(() =>
+      resolveDeviceScaleFactor({
+        ...defaults,
+        outputResolution: "landscape-4k",
+        hdrRequested: true,
+      }),
+    ).toThrow(/hdrMode='force-hdr'/);
+  });
+
+  it("rejects alpha + outputResolution (the alpha capture path doesn't apply DPR yet)", () => {
+    expect(() =>
+      resolveDeviceScaleFactor({
+        ...defaults,
+        outputResolution: "landscape-4k",
+        alphaRequested: true,
+      }),
+    ).toThrow(/alpha output/);
+  });
+
+  it("rejects orientation mismatch (landscape comp → portrait-4k)", () => {
+    expect(() =>
+      resolveDeviceScaleFactor({ ...defaults, outputResolution: "portrait-4k" }),
+    ).toThrow(/aspect ratio/);
+  });
+
+  it("rejects downsampling (4K composition → 1080p output)", () => {
+    expect(() =>
+      resolveDeviceScaleFactor({
+        ...defaults,
+        compositionWidth: 3840,
+        compositionHeight: 2160,
+        outputResolution: "landscape",
+      }),
+    ).toThrow(/Downsampling/);
+  });
+
+  it("rejects non-integer scale factors", () => {
+    // 1500×844 → 3840×2160 has slightly different ratios in width vs height.
+    // The aspect-ratio guard fires first; pinning the rejection message
+    // covers both error paths since either is an acceptable failure here.
+    expect(() =>
+      resolveDeviceScaleFactor({
+        ...defaults,
+        compositionWidth: 1500,
+        compositionHeight: 844,
+        outputResolution: "landscape-4k",
+      }),
+    ).toThrow(/aspect ratio|non-integer/);
+  });
+
+  it("returns 1 for a square comp matching the square preset", () => {
+    expect(
+      resolveDeviceScaleFactor({
+        ...defaults,
+        compositionWidth: 1080,
+        compositionHeight: 1080,
+        outputResolution: "square",
+      }),
+    ).toBe(1);
+  });
+
+  it("returns 2 for square 1080 → square-4k", () => {
+    expect(
+      resolveDeviceScaleFactor({
+        ...defaults,
+        compositionWidth: 1080,
+        compositionHeight: 1080,
+        outputResolution: "square-4k",
+      }),
+    ).toBe(2);
+  });
+
+  it("rejects landscape preset on a square composition", () => {
+    expect(() =>
+      resolveDeviceScaleFactor({
+        ...defaults,
+        compositionWidth: 1080,
+        compositionHeight: 1080,
+        outputResolution: "landscape",
+      }),
+    ).toThrow(/aspect ratio/);
   });
 });

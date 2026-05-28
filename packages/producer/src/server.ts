@@ -38,6 +38,7 @@ import { prepareHyperframeLintBody, runHyperframeLint } from "./services/hyperfr
 import { resolveRenderPaths } from "./utils/paths.js";
 import { defaultLogger, type ProducerLogger } from "./logger.js";
 import { Semaphore } from "./utils/semaphore.js";
+import { parseFps } from "@hyperframes/core";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,7 +69,7 @@ export interface ServerOptions extends HandlerOptions {
 interface RenderInput {
   projectDir: string;
   outputPath?: string | null;
-  fps: 24 | 30 | 60;
+  fps: import("@hyperframes/core").Fps;
   quality: "draft" | "standard" | "high";
   format?: "mp4" | "webm" | "mov";
   workers?: number;
@@ -83,7 +84,14 @@ interface PreparedRenderInput {
 }
 
 function parseRenderOptions(body: Record<string, unknown>): Omit<RenderInput, "projectDir"> {
-  const fps = ([24, 30, 60].includes(body.fps as number) ? body.fps : 30) as 24 | 30 | 60;
+  // Accept either a JSON `number` (integer fps) or a JSON `string` (rational
+  // like "30000/1001"). Falls back to 30 fps on parse failure to preserve the
+  // forgiving behaviour the original whitelist had — the producer surfaces a
+  // clearer downstream error if the value is genuinely unusable.
+  const fpsRaw = body.fps;
+  const fpsParse =
+    typeof fpsRaw === "number" || typeof fpsRaw === "string" ? parseFps(fpsRaw) : null;
+  const fps = fpsParse && fpsParse.ok ? fpsParse.value : ({ num: 30, den: 1 } as const);
   const quality = (
     ["draft", "standard", "high"].includes(body.quality as string) ? body.quality : "high"
   ) as "draft" | "standard" | "high";
@@ -620,8 +628,10 @@ export function startServer(options: ServerOptions = {}) {
   (server as unknown as import("node:http").Server).requestTimeout = 0;
   (server as unknown as import("node:http").Server).keepAliveTimeout = 0;
 
-  function shutdown(signal: string) {
+  async function shutdown(signal: string) {
     log.info(`Received ${signal}, shutting down`);
+    const { drainBrowserPool } = await import("@hyperframes/engine");
+    await drainBrowserPool().catch(() => {});
     server.close(() => {
       log.info("Server closed");
       process.exit(0);

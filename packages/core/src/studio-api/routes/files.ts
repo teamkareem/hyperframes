@@ -17,7 +17,12 @@ import { isAudioFile } from "../helpers/mime.js";
 import { generateWaveformCache } from "../helpers/waveform.js";
 import { validateUploadedMediaBuffer } from "../helpers/mediaValidation.js";
 import { isSafePath } from "../helpers/safePath.js";
-import { removeElementFromHtml } from "../helpers/sourceMutation.js";
+import {
+  removeElementFromHtml,
+  patchElementInHtml,
+  probeElementInSource,
+  type PatchOperation,
+} from "../helpers/sourceMutation.js";
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -26,13 +31,19 @@ import { removeElementFromHtml } from "../helpers/sourceMutation.js";
  * Returns null (and sends an error response) if anything is invalid.
  */
 interface RouteContext {
-  req: { param: (name: string) => string; path: string };
+  req: {
+    param: (name: string) => string;
+    path: string;
+    query: (name: string) => string | undefined;
+  };
   json: (data: unknown, status?: number) => Response;
 }
 
-async function resolveProjectFile(
+/** Resolve project + safe absolute path for any project-scoped route. */
+async function resolveProjectPath(
   c: RouteContext,
   adapter: StudioApiAdapter,
+  pathPrefix: (projectId: string) => string,
   opts?: { mustExist?: boolean },
 ) {
   const id = c.req.param("id");
@@ -41,7 +52,7 @@ async function resolveProjectFile(
     return { error: c.json({ error: "not found" }, 404) } as const;
   }
 
-  const filePath = decodeURIComponent(c.req.path.replace(`/projects/${project.id}/files/`, ""));
+  const filePath = decodeURIComponent(c.req.path.replace(pathPrefix(project.id), ""));
   if (filePath.includes("\0")) {
     return { error: c.json({ error: "forbidden" }, 403) } as const;
   }
@@ -56,6 +67,48 @@ async function resolveProjectFile(
   }
 
   return { project, filePath, absPath } as const;
+}
+
+function resolveProjectFile(
+  c: RouteContext,
+  adapter: StudioApiAdapter,
+  opts?: { mustExist?: boolean },
+) {
+  return resolveProjectPath(c, adapter, (id) => `/projects/${id}/files/`, opts);
+}
+
+function resolveFileMutationContext(c: RouteContext, adapter: StudioApiAdapter, operation: string) {
+  return resolveProjectPath(c, adapter, (id) => `/projects/${id}/file-mutations/${operation}/`);
+}
+
+type MutationTarget = { id?: string | null; selector?: string; selectorIndex?: number };
+
+/** Write `next` to `absPath` only if it differs from `original`, returning a standardized change response. */
+function writeIfChanged(
+  c: RouteContext,
+  absPath: string,
+  original: string,
+  next: string,
+): Response {
+  if (next === original) {
+    return c.json({ ok: true, changed: false, content: original });
+  }
+  writeFileSync(absPath, next, "utf-8");
+  return c.json({ ok: true, changed: true, content: next });
+}
+
+/**
+ * Parse the request body and validate that `target` is present.
+ * Returns `{ error }` if missing, or `{ target, body }` for the full parsed body.
+ */
+async function parseMutationBody<T extends { target?: MutationTarget }>(
+  c: RouteContext & { req: { json(): Promise<unknown> } },
+): Promise<{ error: Response } | { target: MutationTarget; body: T }> {
+  const body = (await (c.req as { json(): Promise<unknown> }).json().catch(() => null)) as T | null;
+  if (!body?.target) {
+    return { error: c.json({ error: "target required" }, 400) };
+  }
+  return { target: body.target, body };
 }
 
 /** Ensure the parent directory of a path exists. */
@@ -135,8 +188,15 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
   // ── Read ──
 
   api.get("/projects/:id/files/*", async (c) => {
-    const res = await resolveProjectFile(c, adapter, { mustExist: true });
+    const res = await resolveProjectFile(c, adapter);
     if ("error" in res) return res.error;
+
+    if (!existsSync(res.absPath)) {
+      if (c.req.query("optional") === "1") {
+        return c.json({ filename: res.filePath, content: "" });
+      }
+      return c.json({ error: "not found" }, 404);
+    }
 
     const content = readFileSync(res.absPath, "utf-8");
     return c.json({ filename: res.filePath, content });
@@ -189,40 +249,68 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
   });
 
   api.post("/projects/:id/file-mutations/remove-element/*", async (c) => {
-    const id = c.req.param("id");
-    const project = await adapter.resolveProject(id);
-    if (!project) return c.json({ error: "not found" }, 404);
+    const ctx = await resolveFileMutationContext(c, adapter, "remove-element");
+    if ("error" in ctx) return ctx.error;
 
-    const filePath = decodeURIComponent(
-      c.req.path.replace(`/projects/${project.id}/file-mutations/remove-element/`, ""),
-    );
-    if (filePath.includes("\0")) {
-      return c.json({ error: "forbidden" }, 403);
-    }
-
-    const absPath = resolve(project.dir, filePath);
-    if (!isSafePath(project.dir, absPath)) {
-      return c.json({ error: "forbidden" }, 403);
-    }
-    if (!existsSync(absPath)) {
+    if (!existsSync(ctx.absPath)) {
       return c.json({ error: "not found" }, 404);
     }
 
-    const body = (await c.req.json().catch(() => null)) as {
-      target?: { id?: string | null; selector?: string; selectorIndex?: number };
-    } | null;
-    if (!body?.target) {
-      return c.json({ error: "target required" }, 400);
+    const parsed = await parseMutationBody<{ target?: MutationTarget }>(c);
+    if ("error" in parsed) return parsed.error;
+
+    const originalContent = readFileSync(ctx.absPath, "utf-8");
+    return writeIfChanged(
+      c,
+      ctx.absPath,
+      originalContent,
+      removeElementFromHtml(originalContent, parsed.target),
+    );
+  });
+
+  api.post("/projects/:id/file-mutations/patch-element/*", async (c) => {
+    const ctx = await resolveFileMutationContext(c, adapter, "patch-element");
+    if ("error" in ctx) return ctx.error;
+
+    const parsed = await parseMutationBody<{
+      target?: MutationTarget;
+      operations?: PatchOperation[];
+    }>(c);
+    if ("error" in parsed) return parsed.error;
+    if (!Array.isArray(parsed.body.operations) || parsed.body.operations.length === 0) {
+      return c.json({ error: "target and operations required" }, 400);
     }
 
-    const originalContent = readFileSync(absPath, "utf-8");
-    const patchedContent = removeElementFromHtml(originalContent, body.target);
-    if (patchedContent === originalContent) {
-      return c.json({ ok: true, changed: false, content: originalContent });
+    let originalContent: string;
+    try {
+      originalContent = readFileSync(ctx.absPath, "utf-8");
+    } catch {
+      return c.json({ error: "not found" }, 404);
+    }
+    return writeIfChanged(
+      c,
+      ctx.absPath,
+      originalContent,
+      patchElementInHtml(originalContent, parsed.target, parsed.body.operations),
+    );
+  });
+
+  api.post("/projects/:id/file-mutations/probe-element/*", async (c) => {
+    const ctx = await resolveFileMutationContext(c, adapter, "probe-element");
+    if ("error" in ctx) return ctx.error;
+
+    const parsed = await parseMutationBody<{ target?: MutationTarget }>(c);
+    if ("error" in parsed) return parsed.error;
+
+    let content: string;
+    try {
+      content = readFileSync(ctx.absPath, "utf-8");
+    } catch {
+      return c.json({ exists: false });
     }
 
-    writeFileSync(absPath, patchedContent, "utf-8");
-    return c.json({ ok: true, changed: true, content: patchedContent });
+    const exists = probeElementInSource(content, parsed.target);
+    return c.json({ exists });
   });
 
   // ── Rename / Move ──
@@ -306,8 +394,21 @@ export function registerFileRoutes(api: Hono, adapter: StudioApiAdapter): void {
       const skipped: string[] = [];
       const invalid: Array<{ name: string; reason: string }> = [];
 
-      for (const [, value] of formData.entries()) {
-        if (!(value instanceof File)) continue;
+      // @types/node v25 narrows the ambient `FormData.entries()` to
+      // `[string, string]` in workspaces where another dep declares an
+      // `onmessage` global (it trips the worker branch of v25's conditional
+      // File type). At runtime the value is still `File | string` — cast the
+      // iterator so the rest of this block keeps type-checking on every
+      // bun-install layout (hoisted on Windows surfaces this; isolated on
+      // Linux happens to keep v24 in scope).
+      type FileLike = {
+        readonly name: string;
+        readonly size: number;
+        arrayBuffer(): Promise<ArrayBuffer>;
+      };
+      const entries = formData.entries() as unknown as Iterable<[string, FileLike | string]>;
+      for (const [, value] of entries) {
+        if (typeof value === "string") continue;
 
         // Strip path separators — browsers may include directory components
         const name = value.name.split("/").pop()?.split("\\").pop() ?? "";

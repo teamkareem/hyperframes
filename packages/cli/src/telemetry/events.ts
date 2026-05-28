@@ -11,6 +11,9 @@ export function trackRenderComplete(props: {
   workers?: number;
   docker: boolean;
   gpu: boolean;
+  // "cli" when triggered by `hyperframes render` (default), "studio" when
+  // triggered by a studio preview-server render (POST /api/projects/:id/render).
+  source?: "cli" | "studio";
   // Composition metadata
   compositionDurationMs?: number;
   compositionWidth?: number;
@@ -50,6 +53,7 @@ export function trackRenderComplete(props: {
     workers: props.workers,
     docker: props.docker,
     gpu: props.gpu,
+    source: props.source ?? "cli",
     composition_duration_ms: props.compositionDurationMs,
     composition_width: props.compositionWidth,
     composition_height: props.compositionHeight,
@@ -85,6 +89,7 @@ export function trackRenderError(props: {
   docker: boolean;
   workers?: number;
   gpu?: boolean;
+  source?: "cli" | "studio";
   failedStage?: string;
   errorMessage?: string;
   elapsedMs?: number;
@@ -97,6 +102,7 @@ export function trackRenderError(props: {
     docker: props.docker,
     workers: props.workers,
     gpu: props.gpu,
+    source: props.source ?? "cli",
     failed_stage: props.failedStage,
     error_message: props.errorMessage,
     elapsed_ms: props.elapsedMs,
@@ -111,4 +117,49 @@ export function trackInitTemplate(templateId: string, props?: { tailwind?: boole
 
 export function trackBrowserInstall(): void {
   trackEvent("browser_install", {});
+}
+
+export function trackCliError(props: {
+  error_name: string;
+  error_message: string;
+  stack_trace?: string;
+  command?: string;
+  kind: "uncaught_exception" | "unhandled_rejection" | "command_error";
+}): void {
+  trackEvent("cli_error", {
+    error_name: props.error_name,
+    error_message: props.error_message.slice(0, 1000),
+    stack_trace: props.stack_trace?.slice(0, 2000),
+    command: props.command,
+    kind: props.kind,
+  });
+}
+
+export function trackRenderFeedback(props: {
+  rating: number;
+  renderDurationMs: number;
+  comment?: string;
+  doctorSummary?: string;
+}): void {
+  trackEvent("survey sent", {
+    $survey_id: "render_satisfaction",
+    $survey_response: props.rating,
+    ...(props.comment ? { $survey_response_2: props.comment } : {}),
+    render_duration_ms: props.renderDurationMs,
+    ...(props.doctorSummary ? { doctor_summary: props.doctorSummary } : {}),
+  });
+}
+
+export function trackCommandResult(props: {
+  command: string;
+  success: boolean;
+  exitCode: number;
+  durationMs: number;
+}): void {
+  trackEvent("cli_command_result", {
+    command: props.command,
+    success: props.success,
+    exit_code: props.exitCode,
+    duration_ms: props.durationMs,
+  });
 }

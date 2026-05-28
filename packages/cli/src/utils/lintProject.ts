@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve, extname } from "node:path";
+import { dirname, extname, isAbsolute, join, posix, relative, resolve } from "node:path";
 import { lintHyperframeHtml, type HyperframeLintResult } from "@hyperframes/core/lint";
 import type { HyperframeLintFinding } from "@hyperframes/core/lint";
-import { rewriteAssetPath } from "@hyperframes/core";
+import { decodeUrlPathVariants, rewriteAssetPath } from "@hyperframes/core";
 import type { ProjectDir } from "./project.js";
 
 /**
@@ -18,6 +18,12 @@ interface HtmlSource {
   compSrcPath?: string;
 }
 
+interface CssSource {
+  content: string;
+  /** Root-relative path to the CSS file. Undefined means inline HTML CSS. */
+  rootRelativePath?: string;
+}
+
 export interface ProjectLintResult {
   results: Array<{ file: string; result: HyperframeLintResult }>;
   totalErrors: number;
@@ -26,6 +32,16 @@ export interface ProjectLintResult {
 }
 
 const AUDIO_EXTENSIONS = new Set([".mp3", ".wav", ".aac", ".ogg", ".m4a", ".flac", ".opus"]);
+const STYLE_BLOCK_RE = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+const OPEN_TAG_RE = /<([a-z][\w:-]*)(\s[^<>]*?)?>/gi;
+const MASK_IMAGE_URL_RE =
+  /\b(?:-webkit-)?mask-image\s*:\s*[^;{}]*url\(\s*(?:"([^"]+)"|'([^']+)'|([^"')\s]+))\s*\)/gi;
+
+function readHtmlAttr(tag: string, name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = tag.match(new RegExp(`\\b${escaped}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, "i"));
+  return match?.[1] ?? match?.[2] ?? null;
+}
 
 function isLocalStylesheetHref(href: string): boolean {
   return !!href && !/^(https?:|data:|blob:|\/\/)/i.test(href);
@@ -46,11 +62,117 @@ function collectExternalStyles(
     const href = tag.match(/\bhref\s*=\s*["']([^"']+)["']/i)?.[1] ?? "";
     if (!isLocalStylesheetHref(href)) continue;
     const rootRelative = compSrcPath ? join(dirname(compSrcPath), href) : href;
-    const resolved = resolve(projectDir, rootRelative);
-    if (!existsSync(resolved)) continue;
-    styles.push({ href, content: readFileSync(resolved, "utf-8") });
+    const stylesheet = resolveExistingLocalAsset(projectDir, rootRelative);
+    if (!stylesheet) continue;
+    styles.push({ href, content: readFileSync(stylesheet.resolved, "utf-8") });
   }
   return styles;
+}
+
+function collectCssSources(projectDir: string, html: string, compSrcPath?: string): CssSource[] {
+  const sources: CssSource[] = [];
+
+  let styleMatch: RegExpExecArray | null;
+  const stylePattern = new RegExp(STYLE_BLOCK_RE.source, STYLE_BLOCK_RE.flags);
+  while ((styleMatch = stylePattern.exec(html)) !== null) {
+    sources.push({ content: styleMatch[1] ?? "" });
+  }
+
+  const linkRe = /<link\b[^>]*>/gi;
+  let linkMatch: RegExpExecArray | null;
+  while ((linkMatch = linkRe.exec(html)) !== null) {
+    const tag = linkMatch[0];
+    const rel = readHtmlAttr(tag, "rel") ?? "";
+    if (!rel.split(/\s+/).some((part) => part.toLowerCase() === "stylesheet")) continue;
+    const href = readHtmlAttr(tag, "href") ?? "";
+    if (!isLocalStylesheetHref(href)) continue;
+
+    const rootRelativePath = compSrcPath ? join(dirname(compSrcPath), href) : href;
+    const stylesheet = resolveExistingLocalAsset(projectDir, rootRelativePath);
+    if (!stylesheet) continue;
+    sources.push({
+      content: readFileSync(stylesheet.resolved, "utf-8"),
+      rootRelativePath: stylesheet.rootRelativePath,
+    });
+  }
+
+  let tagMatch: RegExpExecArray | null;
+  const tagPattern = new RegExp(OPEN_TAG_RE.source, OPEN_TAG_RE.flags);
+  while ((tagMatch = tagPattern.exec(html)) !== null) {
+    const tag = tagMatch[0];
+    const style = readHtmlAttr(tag, "style");
+    if (!style) continue;
+    sources.push({ content: style });
+  }
+
+  return sources;
+}
+
+function isRemoteOrInlineUrl(url: string): boolean {
+  return /^(https?:|data:|blob:|\/\/|#)/i.test(url);
+}
+
+function cleanAssetUrl(url: string): string {
+  return url.trim().split(/[?#]/, 1)[0] ?? "";
+}
+
+function isWithinProjectRoot(projectDir: string, candidate: string): boolean {
+  const projectRoot = resolve(projectDir);
+  const relativePath = relative(projectRoot, candidate);
+  return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+function addCandidate(candidates: string[], candidate: string): void {
+  if (!candidates.includes(candidate)) candidates.push(candidate);
+}
+
+function resolveLocalAssetCandidates(projectDir: string, url: string): string[] {
+  const cleanUrl = cleanAssetUrl(url);
+  const projectRoot = resolve(projectDir);
+  const candidates: string[] = [];
+
+  for (const variant of decodeUrlPathVariants(cleanUrl)) {
+    const projectRelative = variant.startsWith("/") ? variant.slice(1) : variant;
+    const resolved = resolve(projectRoot, projectRelative);
+    if (isWithinProjectRoot(projectRoot, resolved)) {
+      addCandidate(candidates, resolved);
+      continue;
+    }
+
+    const normalized = posix.normalize(projectRelative.replace(/\\/g, "/"));
+    const clamped = normalized.replace(/^(\.\.\/)+/, "");
+    if (clamped && !clamped.startsWith("..")) {
+      addCandidate(candidates, resolve(projectRoot, clamped));
+    }
+  }
+
+  return candidates;
+}
+
+function resolveExistingLocalAsset(
+  projectDir: string,
+  url: string,
+): { resolved: string; rootRelativePath: string } | null {
+  const projectRoot = resolve(projectDir);
+  const resolved = resolveLocalAssetCandidates(projectRoot, url).find(existsSync);
+  if (!resolved) return null;
+  return { resolved, rootRelativePath: relative(projectRoot, resolved) };
+}
+
+function resolveCssAssetCandidates(
+  projectDir: string,
+  url: string,
+  htmlCompSrcPath?: string,
+  cssRootRelativePath?: string,
+): string[] {
+  if (url.startsWith("/")) return resolveLocalAssetCandidates(projectDir, url);
+  if (cssRootRelativePath) {
+    return resolveLocalAssetCandidates(projectDir, join(dirname(cssRootRelativePath), url));
+  }
+  if (htmlCompSrcPath) {
+    return resolveLocalAssetCandidates(projectDir, rewriteAssetPath(htmlCompSrcPath, url));
+  }
+  return resolveLocalAssetCandidates(projectDir, url);
 }
 
 /**
@@ -101,6 +223,7 @@ export function lintProject(project: ProjectDir): ProjectLintResult {
   const projectFindings = [
     ...lintProjectAudioFiles(project.dir, allHtmlSources),
     ...lintAudioSrcNotFound(project.dir, allHtmlSources),
+    ...lintTextureMaskAssetNotFound(project.dir, allHtmlSources),
     ...lintMultipleRootCompositions(project.dir),
     ...lintDuplicateAudioTracks(allHtmlSources),
   ];
@@ -192,8 +315,7 @@ function lintAudioSrcNotFound(
       // before serving. Mirror that rewrite here so the existence check sees
       // the same path the renderer will. Root-html srcs pass through unchanged.
       const rootRelative = compSrcPath ? rewriteAssetPath(compSrcPath, src) : src;
-      const resolved = resolve(projectDir, rootRelative);
-      if (!existsSync(resolved)) {
+      if (!resolveLocalAssetCandidates(projectDir, rootRelative).some(existsSync)) {
         missingSrcs.push(src);
       }
     }
@@ -213,6 +335,49 @@ function lintAudioSrcNotFound(
   }
 
   return findings;
+}
+
+function lintTextureMaskAssetNotFound(
+  projectDir: string,
+  htmlSources: HtmlSource[],
+): HyperframeLintFinding[] {
+  const missing = new Map<string, string>();
+
+  for (const { html, compSrcPath } of htmlSources) {
+    for (const cssSource of collectCssSources(projectDir, html, compSrcPath)) {
+      let match: RegExpExecArray | null;
+      const pattern = new RegExp(MASK_IMAGE_URL_RE.source, MASK_IMAGE_URL_RE.flags);
+      while ((match = pattern.exec(cssSource.content)) !== null) {
+        const rawUrl = match[1] ?? match[2] ?? match[3] ?? "";
+        const url = cleanAssetUrl(rawUrl);
+        if (!url || isRemoteOrInlineUrl(url)) continue;
+        if (/^__[A-Z_]+__$/.test(url)) continue;
+
+        const candidates = resolveCssAssetCandidates(
+          projectDir,
+          url,
+          compSrcPath,
+          cssSource.rootRelativePath,
+        );
+        if (candidates.some(existsSync)) continue;
+        missing.set(url, candidates[0] ?? resolve(projectDir, url));
+      }
+    }
+  }
+
+  if (missing.size === 0) return [];
+  const urls = [...missing.keys()];
+  return [
+    {
+      code: "texture_mask_asset_not_found",
+      severity: "error",
+      message: `CSS mask-image references file(s) not found in the project: ${urls.join(", ")}.`,
+      fixHint:
+        urls.length === 1
+          ? `Add "${urls[0]}" to the project, or update the mask-image URL to point to an existing texture mask.`
+          : "Add the missing texture mask files to the project, or update the mask-image URLs to point to existing files.",
+    },
+  ];
 }
 
 /**

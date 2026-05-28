@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { trackStudioRenderStart } from "../../telemetry/events";
 
 export interface RenderJob {
   id: string;
@@ -9,6 +10,28 @@ export interface RenderJob {
   filename: string;
   createdAt: number;
   durationMs?: number;
+}
+
+// Mirrors `CanvasResolution` from @hyperframes/core. Kept local because
+// studio's tsconfig doesn't include node types, and the core barrel
+// transitively pulls in modules with `node:fs` imports. Drift risk is
+// low (6 string literals kept in sync manually with CANVAS_DIMENSIONS).
+export type ResolutionPreset =
+  | "landscape"
+  | "portrait"
+  | "landscape-4k"
+  | "portrait-4k"
+  | "square"
+  | "square-4k";
+
+export interface StartRenderOptions {
+  fps?: number;
+  quality?: "draft" | "standard" | "high";
+  format?: "mp4" | "webm" | "mov";
+  /** `"auto"` (default) renders at the composition's authored dimensions. */
+  resolution?: ResolutionPreset | "auto";
+  /** Render a specific composition file instead of index.html. */
+  composition?: string;
 }
 
 export function useRenderQueue(projectId: string | null) {
@@ -59,20 +82,46 @@ export function useRenderQueue(projectId: string | null) {
 
   // Start a render and track progress via SSE
   const startRender = useCallback(
-    async (
-      fps = 30,
-      quality: "draft" | "standard" | "high" = "standard",
-      format: "mp4" | "webm" | "mov" = "mp4",
-    ) => {
+    async (opts: StartRenderOptions = {}) => {
       if (!projectId) return;
 
+      const fps = opts.fps ?? 30;
+      const quality = opts.quality ?? "standard";
+      const format = opts.format ?? "mp4";
+      const resolution = opts.resolution;
+      const composition = opts.composition;
+
+      trackStudioRenderStart({
+        fps,
+        quality,
+        format,
+        resolution,
+        composition,
+      });
+
       const startTime = Date.now();
+      // "auto" / undefined means "render at the composition's authored size".
+      // Omit the field entirely — sending "auto" would trip the route's
+      // enum validation set.
+      const body: {
+        fps: number;
+        quality: string;
+        format: string;
+        resolution?: string;
+        composition?: string;
+      } = {
+        fps,
+        quality,
+        format,
+      };
+      if (resolution && resolution !== "auto") body.resolution = resolution;
+      if (composition) body.composition = composition;
       let res: Response;
       try {
         res = await fetch(`/api/projects/${projectId}/render`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fps, quality, format }),
+          body: JSON.stringify(body),
         });
       } catch {
         const failedJob: RenderJob = {

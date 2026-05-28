@@ -1,6 +1,6 @@
 {
   "name": "@hyperframes/core",
-  "version": "0.5.3",
+  "version": "0.6.52",
   "description": "",
   "repository": {
     "type": "git",
@@ -31,8 +31,8 @@
     },
     "./runtime": "./dist/hyperframe.runtime.iife.js",
     "./runtime/lottie-readiness": {
-      "import": "./src/runtime/adapters/lottieReadiness.ts",
-      "types": "./src/runtime/adapters/lottieReadiness.ts"
+      "import": "./src/lottieReadiness.ts",
+      "types": "./src/lottieReadiness.ts"
     },
     "./studio-api": {
       "import": "./src/studio-api/index.ts",
@@ -41,6 +41,14 @@
     "./studio-api/screenshot-clip": {
       "import": "./src/studio-api/helpers/screenshotClip.ts",
       "types": "./src/studio-api/helpers/screenshotClip.ts"
+    },
+    "./studio-api/manual-edits-render-script": {
+      "import": "./src/studio-api/helpers/manualEditsRenderScript.ts",
+      "types": "./src/studio-api/helpers/manualEditsRenderScript.ts"
+    },
+    "./studio-api/studio-motion-render-script": {
+      "import": "./src/studio-api/helpers/studioMotionRenderScript.ts",
+      "types": "./src/studio-api/helpers/studioMotionRenderScript.ts"
     },
     "./text": {
       "import": "./src/text/index.ts",
@@ -70,8 +78,8 @@
       },
       "./runtime": "./dist/hyperframe.runtime.iife.js",
       "./runtime/lottie-readiness": {
-        "import": "./dist/runtime/adapters/lottieReadiness.js",
-        "types": "./dist/runtime/adapters/lottieReadiness.d.ts"
+        "import": "./dist/lottieReadiness.js",
+        "types": "./dist/lottieReadiness.d.ts"
       },
       "./studio-api": {
         "import": "./dist/studio-api/index.js",
@@ -80,6 +88,14 @@
       "./studio-api/screenshot-clip": {
         "import": "./dist/studio-api/helpers/screenshotClip.js",
         "types": "./dist/studio-api/helpers/screenshotClip.d.ts"
+      },
+      "./studio-api/manual-edits-render-script": {
+        "import": "./dist/studio-api/helpers/manualEditsRenderScript.js",
+        "types": "./dist/studio-api/helpers/manualEditsRenderScript.d.ts"
+      },
+      "./studio-api/studio-motion-render-script": {
+        "import": "./dist/studio-api/helpers/studioMotionRenderScript.js",
+        "types": "./dist/studio-api/helpers/studioMotionRenderScript.d.ts"
       },
       "./text": {
         "import": "./dist/text/index.js",
@@ -123,7 +139,7 @@
   },
   "devDependencies": {
     "@types/jsdom": "^28.0.0",
-    "@types/node": "^24.10.13",
+    "@types/node": "^25.0.10",
     "@vitest/coverage-v8": "^3.2.4",
     "jsdom": "^29.0.0",
     "tsx": "^4.21.0",

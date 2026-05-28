@@ -31,7 +31,7 @@ const FIXTURE_SRC = join(FIXTURE_DIR, "src");
 
 const WIDTH = 200;
 const HEIGHT = 200;
-const FPS = 30;
+const FPS: import("@hyperframes/core").Fps = { num: 30, den: 1 };
 const TRANSPARENT_X = 10; // expected fully transparent
 const TRANSPARENT_Y = 10;
 const OPAQUE_X = 100; // inside the 50–150 red card

@@ -1,4 +1,4 @@
-import { useRef, useCallback, memo } from "react";
+import { useRef, useCallback, useEffect, memo } from "react";
 import {
   EditorView,
   keymap,
@@ -55,6 +55,7 @@ interface SourceEditorProps {
   language?: string;
   onChange?: (content: string) => void;
   readOnly?: boolean;
+  revealOffset?: number | null;
 }
 
 export const SourceEditor = memo(function SourceEditor({
@@ -63,11 +64,15 @@ export const SourceEditor = memo(function SourceEditor({
   language,
   onChange,
   readOnly = false,
+  revealOffset,
 }: SourceEditorProps) {
   const editorRef = useRef<EditorView | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
+
+  const contentRef = useRef(content);
+  contentRef.current = content;
 
   const mountEditor = useCallback(
     (node: HTMLDivElement | null) => {
@@ -87,7 +92,7 @@ export const SourceEditor = memo(function SourceEditor({
       });
 
       const state = EditorState.create({
-        doc: content,
+        doc: contentRef.current,
         extensions: [
           lineNumbers(),
           highlightActiveLine(),
@@ -112,8 +117,34 @@ export const SourceEditor = memo(function SourceEditor({
 
       editorRef.current = new EditorView({ state, parent: node });
     },
-    [content, filePath, language, readOnly],
+    [filePath, language, readOnly],
   );
+
+  // Sync external content changes into the editor without recreating it.
+  // Only applies when the new content differs from the current document
+  // (e.g. file switch or server refresh), not on every keystroke.
+  useEffect(() => {
+    const view = editorRef.current;
+    if (!view) return;
+    const current = view.state.doc.toString();
+    if (current !== content) {
+      view.dispatch({
+        changes: { from: 0, to: current.length, insert: content },
+      });
+    }
+  }, [content]);
+
+  useEffect(() => {
+    const view = editorRef.current;
+    if (!view || revealOffset == null || revealOffset < 0) return;
+    const docLen = view.state.doc.length;
+    const pos = Math.min(revealOffset, docLen);
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: "center" }),
+    });
+    view.focus();
+  }, [revealOffset]);
 
   return <div ref={mountEditor} className="h-full w-full overflow-hidden" />;
 });

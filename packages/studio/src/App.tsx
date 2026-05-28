@@ -1,1748 +1,652 @@
-import {
-  useState,
-  useCallback,
-  useRef,
-  useEffect,
-  useMemo,
-  type MouseEvent,
-  type ReactNode,
-} from "react";
-import { useMountEffect } from "./hooks/useMountEffect";
-import { NLELayout } from "./components/nle/NLELayout";
-import { SourceEditor } from "./components/editor/SourceEditor";
-import { LeftSidebar } from "./components/sidebar/LeftSidebar";
-import { RenderQueue } from "./components/renders/RenderQueue";
+import { useState, useCallback, useRef, useMemo, useEffect } from "react";
+import type { LeftSidebarHandle, SidebarTab } from "./components/sidebar/LeftSidebar";
 import { useRenderQueue } from "./components/renders/useRenderQueue";
-import { CompositionThumbnail, VideoThumbnail, liveTime, usePlayerStore } from "./player";
-import { AudioWaveform } from "./player/components/AudioWaveform";
-import type { TimelineElement } from "./player";
+import { usePlayerStore } from "./player";
 import { LintModal } from "./components/LintModal";
-import type { LintFinding } from "./components/LintModal";
-import { MediaPreview } from "./components/MediaPreview";
-import { isMediaFile } from "./utils/mediaTypes";
-import {
-  buildTimelineAssetId,
-  buildTimelineAssetInsertHtml,
-  buildTimelineFileDropPlacements,
-  getTimelineAssetKind,
-  insertTimelineAssetIntoSource,
-  resolveTimelineAssetSrc,
-  type TimelineAssetKind,
-} from "./utils/timelineAssetDrop";
-import { CaptionOverlay } from "./captions/components/CaptionOverlay";
-import { CaptionPropertyPanel } from "./captions/components/CaptionPropertyPanel";
-import { CaptionTimeline } from "./captions/components/CaptionTimeline";
 import { useCaptionStore } from "./captions/store";
 import { useCaptionSync } from "./captions/hooks/useCaptionSync";
-import { parseCaptionComposition } from "./captions/parser";
-import { applyPatchByTarget, readAttributeByTarget } from "./utils/sourcePatcher";
+import { usePersistentEditHistory } from "./hooks/usePersistentEditHistory";
+import { usePanelLayout } from "./hooks/usePanelLayout";
+import { useFileManager } from "./hooks/useFileManager";
+import { usePreviewPersistence } from "./hooks/usePreviewPersistence";
+import { useTimelineEditing } from "./hooks/useTimelineEditing";
+import { addBlockToProject } from "./utils/blockInstaller";
+import type { BlockParam } from "@hyperframes/core/registry";
+import type { BlockPreviewInfo } from "./components/sidebar/BlocksTab";
+import { useDomEditSession } from "./hooks/useDomEditSession";
+import { useAppHotkeys } from "./hooks/useAppHotkeys";
+import { useClipboard } from "./hooks/useClipboard";
+import { readStudioUiPreferences, writeStudioUiPreferences } from "./utils/studioUiPreferences";
+import { useCaptionDetection } from "./hooks/useCaptionDetection";
+import { useRenderClipContent } from "./hooks/useRenderClipContent";
+import { useConsoleErrorCapture } from "./hooks/useConsoleErrorCapture";
+import { useFrameCapture } from "./hooks/useFrameCapture";
+import { useLintModal } from "./hooks/useLintModal";
+import { useCompositionDimensions } from "./hooks/useCompositionDimensions";
+import { useToast } from "./hooks/useToast";
+import { useStudioUrlState } from "./hooks/useStudioUrlState";
 import {
-  buildTrackZIndexMap,
-  formatTimelineAttributeNumber,
-} from "./player/components/timelineEditing";
+  STUDIO_INSPECTOR_PANELS_ENABLED,
+  STUDIO_MOTION_PANEL_ENABLED,
+} from "./components/editor/manualEditingAvailability";
+import { readStudioMotionFromElement } from "./components/editor/studioMotion";
+import type { DomEditSelection } from "./components/editor/domEditing";
+import { AskAgentModal } from "./components/AskAgentModal";
+import { StudioGlobalDragOverlay } from "./components/StudioGlobalDragOverlay";
+import { StudioHeader } from "./components/StudioHeader";
+import { StudioLeftSidebar } from "./components/StudioLeftSidebar";
+import { StudioPreviewArea } from "./components/StudioPreviewArea";
+import { StudioRightPanel } from "./components/StudioRightPanel";
+import { TimelineToolbar } from "./components/TimelineToolbar";
+import { StudioProvider, type StudioContextValue } from "./contexts/StudioContext";
+import { PanelLayoutProvider } from "./contexts/PanelLayoutContext";
+import { FileManagerProvider } from "./contexts/FileManagerContext";
+import { DomEditProvider } from "./contexts/DomEditContext";
+import { StudioSplash } from "./components/StudioSplash";
+import { useServerConnection } from "./hooks/useServerConnection";
 import {
-  getNextTimelineZoomPercent,
-  getTimelineZoomPercent,
-} from "./player/components/timelineZoom";
-import {
-  getTimelineToggleTitle,
-  shouldHandleTimelineToggleHotkey,
-} from "./utils/timelineDiscovery";
-import { buildFrameCaptureFilename, buildFrameCaptureUrl } from "./utils/frameCapture";
-import { buildProjectHash, parseProjectIdFromHash } from "./utils/projectRouting";
-import { Camera } from "./icons/SystemIcons";
-
-interface EditingFile {
-  path: string;
-  content: string | null;
-}
-
-interface AppToast {
-  message: string;
-  tone: "error" | "info";
-}
-
-function getTimelineElementLabel(element: TimelineElement): string {
-  return element.label || element.id || element.tag;
-}
-
-const DEFAULT_TIMELINE_ASSET_DURATION: Record<TimelineAssetKind, number> = {
-  image: 3,
-  video: 5,
-  audio: 5,
-};
-
-function collectHtmlIds(source: string): string[] {
-  return Array.from(source.matchAll(/\bid="([^"]+)"/g), (match) => match[1] ?? "");
-}
-
-async function resolveDroppedAssetDuration(
-  projectId: string,
-  assetPath: string,
-  kind: TimelineAssetKind,
-): Promise<number> {
-  if (kind === "image") return DEFAULT_TIMELINE_ASSET_DURATION.image;
-
-  const media = document.createElement(kind === "video" ? "video" : "audio");
-  media.preload = "metadata";
-  media.src = `/api/projects/${projectId}/preview/${assetPath}`;
-
-  const duration = await new Promise<number>((resolve) => {
-    const timeout = window.setTimeout(() => resolve(DEFAULT_TIMELINE_ASSET_DURATION[kind]), 3000);
-    const finalize = (value: number) => {
-      window.clearTimeout(timeout);
-      resolve(value);
-    };
-
-    media.addEventListener(
-      "loadedmetadata",
-      () => {
-        const raw = Number(media.duration);
-        finalize(
-          Number.isFinite(raw) && raw > 0
-            ? Math.round(raw * 100) / 100
-            : DEFAULT_TIMELINE_ASSET_DURATION[kind],
-        );
-      },
-      { once: true },
-    );
-    media.addEventListener("error", () => finalize(DEFAULT_TIMELINE_ASSET_DURATION[kind]), {
-      once: true,
-    });
-  });
-
-  media.src = "";
-  media.load();
-  return duration;
-}
-
-// ── Main App ──
+  normalizeStudioCompositionPath,
+  readStudioUrlStateFromWindow,
+} from "./utils/studioUrlState";
+import { trackStudioSessionStart } from "./telemetry/events";
+import { hasFiredSessionStart, markSessionStartFired } from "./telemetry/config";
 
 export function StudioApp() {
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [resolving, setResolving] = useState(true);
+  const { projectId, resolving, waitingForServer } = useServerConnection();
+  const initialUrlStateRef = useRef(readStudioUrlStateFromWindow());
 
-  useMountEffect(() => {
-    const hashProjectId = parseProjectIdFromHash(window.location.hash);
-    if (hashProjectId) {
-      setProjectId(hashProjectId);
-      setResolving(false);
-      return;
-    }
-    // No hash — auto-select first available project
-    fetch("/api/projects")
-      .then((r) => r.json())
-      .then((data) => {
-        const first = (data.projects ?? [])[0];
-        if (first) {
-          setProjectId(first.id);
-          window.location.hash = buildProjectHash(first.id);
-        }
-      })
-      .catch(() => {})
-      .finally(() => setResolving(false));
-  });
+  // Fire once per browser tab session — sessionStorage-backed so HMR
+  // remounts, route changes, and any future StudioApp remount within the
+  // same tab don't refire `studio_session_start`. `has_project` lets us
+  // tell scratch-open from project-context-open.
+  useEffect(() => {
+    if (resolving || waitingForServer) return;
+    if (hasFiredSessionStart()) return;
+    markSessionStartFired();
+    trackStudioSessionStart({ has_project: projectId != null });
+  }, [projectId, resolving, waitingForServer]);
 
-  const [editingFile, setEditingFile] = useState<EditingFile | null>(null);
   const [activeCompPath, setActiveCompPath] = useState<string | null>(null);
-  const [fileTree, setFileTree] = useState<string[]>([]);
+  const [activeCompPathHydrated, setActiveCompPathHydrated] = useState(
+    () => initialUrlStateRef.current.activeCompPath == null,
+  );
   const [compIdToSrc, setCompIdToSrc] = useState<Map<string, string>>(new Map());
+  const [previewIframe, setPreviewIframe] = useState<HTMLIFrameElement | null>(null);
+  const [compositionLoading, setCompositionLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [, setPreviewDocumentVersion] = useState(0);
+  const [activeBlockParams, setActiveBlockParams] = useState<{
+    blockName: string;
+    blockTitle: string;
+    params: BlockParam[];
+    compositionPath: string;
+  } | null>(null);
+  const [blockPreview, setBlockPreview] = useState<BlockPreviewInfo | null>(null);
+
+  const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
+  const activeCompPathRef = useRef(activeCompPath);
+  activeCompPathRef.current = activeCompPath;
+  const leftSidebarRef = useRef<LeftSidebarHandle>(null);
   const renderQueue = useRenderQueue(projectId);
   const captionEditMode = useCaptionStore((s) => s.isEditMode);
   const captionHasSelection = useCaptionStore((s) => s.selectedSegmentIds.size > 0);
   const captionSync = useCaptionSync(projectId);
-
-  // Resizable and collapsible panel widths
-  const [leftWidth, setLeftWidth] = useState(240);
-  const [rightWidth, setRightWidth] = useState(400);
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(true);
-  // Auto-enter caption edit mode when the iframe contains .caption-group elements.
-  // This is a subscription to external events (postMessage from runtime) — useEffect
-  // is appropriate here. The runtime fires "state"/"timeline" messages after all
-  // compositions load, which triggers caption detection.
-  // eslint-disable-next-line no-restricted-syntax
-  useEffect(() => {
-    if (!projectId) return;
-
-    let activating = false;
-
-    const tryActivateCaptions = () => {
-      if (useCaptionStore.getState().isEditMode || activating) {
-        return;
-      }
-
-      const iframe = previewIframeRef.current;
-      let doc: Document | null = null;
-      let win: Window | null = null;
-      try {
-        doc = iframe?.contentDocument ?? null;
-        win = iframe?.contentWindow ?? null;
-      } catch {
-        return;
-      }
-      if (!doc || !win) return;
-
-      const groups = doc.querySelectorAll(".caption-group");
-      if (groups.length === 0) return;
-
-      // Find the captions composition source path.
-      // The runtime strips data-composition-src after loading, so also check
-      // data-composition-file (set by the bundler) and the compIdToSrc map.
-      let captionSrcPath: string | null = null;
-
-      // Strategy 1: data-composition-src or data-composition-file attributes
-      const compHosts = doc.querySelectorAll("[data-composition-src], [data-composition-file]");
-      for (const host of compHosts) {
-        const src =
-          host.getAttribute("data-composition-src") || host.getAttribute("data-composition-file");
-        if (src && src.includes("captions")) {
-          captionSrcPath = src;
-          break;
-        }
-      }
-
-      // Strategy 2: compIdToSrc map (built from raw index.html before runtime strips attrs)
-      if (!captionSrcPath) {
-        for (const [id, src] of compIdToSrc) {
-          if (id.includes("caption") || src.includes("caption")) {
-            captionSrcPath = src;
-            break;
-          }
-        }
-      }
-
-      // Strategy 3: activeCompPath if viewing captions directly
-      if (!captionSrcPath && activeCompPath?.includes("captions")) {
-        captionSrcPath = activeCompPath;
-      }
-
-      // Strategy 4: find composition element with "caption" in its ID
-      if (!captionSrcPath) {
-        const captionComp = doc.querySelector('[data-composition-id*="caption"]');
-        if (captionComp) {
-          const compId = captionComp.getAttribute("data-composition-id") || "";
-          captionSrcPath = compIdToSrc.get(compId) || null;
-        }
-      }
-
-      if (!captionSrcPath) return;
-
-      activating = true;
-      const srcPath = captionSrcPath;
-      fetch(`/api/projects/${projectId}/files/${encodeURIComponent(srcPath)}`)
-        .then((r) => r.json())
-        .then((data: { content?: string }) => {
-          if (!data.content || !doc || !win || useCaptionStore.getState().isEditMode) return;
-          const root = doc.querySelector("[data-composition-id]");
-          const w = parseInt(root?.getAttribute("data-width") ?? "1920", 10);
-          const h = parseInt(root?.getAttribute("data-height") ?? "1080", 10);
-          const dur = parseFloat(root?.getAttribute("data-duration") ?? "0");
-          const model = parseCaptionComposition(doc, win, data.content, w, h, dur);
-          if (!model) return;
-          const store = useCaptionStore.getState();
-          store.setModel(model);
-          store.setSourceFilePath(srcPath);
-          store.setEditMode(true);
-          captionSync.loadOverrides();
-        })
-        .catch(() => {})
-        .finally(() => {
-          activating = false;
-        });
-    };
-
-    // Listen for runtime messages that signal composition loading is complete
-    const handleMessage = (e: MessageEvent) => {
-      const data = e.data;
-      if (data?.source === "hf-preview" && (data?.type === "state" || data?.type === "timeline")) {
-        tryActivateCaptions();
-      }
-    };
-
-    window.addEventListener("message", handleMessage);
-    // Try immediately in case compositions are already loaded
-    tryActivateCaptions();
-
-    return () => {
-      window.removeEventListener("message", handleMessage);
-    };
-  }, [activeCompPath, projectId, compIdToSrc, captionSync]);
-
-  // Auto-expand right panel when a caption word is selected
-  // eslint-disable-next-line no-restricted-syntax
-  useEffect(() => {
-    if (captionEditMode) {
-      setRightCollapsed(!captionHasSelection);
-    }
-  }, [captionHasSelection, captionEditMode]);
-  const [globalDragOver, setGlobalDragOver] = useState(false);
-  const [appToast, setAppToast] = useState<AppToast | null>(null);
-  const [timelineVisible, setTimelineVisible] = useState(true);
-  const [captureFrameTime, setCaptureFrameTime] = useState(0);
-  const dragCounterRef = useRef(0);
-  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastBlockedTimelineToastAtRef = useRef(0);
-  const previewHotkeyWindowRef = useRef<Window | null>(null);
-  const panelDragRef = useRef<{
-    side: "left" | "right";
-    startX: number;
-    startW: number;
-  } | null>(null);
-
-  // Derive active preview URL from composition path (for drilled-down thumbnails)
+  const currentTime = usePlayerStore((s) => s.currentTime);
+  const timelineElements = usePlayerStore((s) => s.elements);
+  const setSelectedTimelineElementId = usePlayerStore((s) => s.setSelectedElementId);
+  const timelineDuration = usePlayerStore((s) => s.duration);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const isMasterView = !activeCompPath || activeCompPath === "index.html";
   const activePreviewUrl = activeCompPath
     ? `/api/projects/${projectId}/preview/comp/${activeCompPath}`
     : null;
-  const zoomMode = usePlayerStore((s) => s.zoomMode);
-  const manualZoomPercent = usePlayerStore((s) => s.manualZoomPercent);
-  const setZoomMode = usePlayerStore((s) => s.setZoomMode);
-  const setManualZoomPercent = usePlayerStore((s) => s.setManualZoomPercent);
-  const timelineElements = usePlayerStore((s) => s.elements);
-  const timelineDuration = usePlayerStore((s) => s.duration);
   const effectiveTimelineDuration = useMemo(() => {
     const maxEnd =
       timelineElements.length > 0
-        ? Math.max(...timelineElements.map((element) => element.start + element.duration))
+        ? Math.max(...timelineElements.map((el) => el.start + el.duration))
         : 0;
     return Math.max(timelineDuration, maxEnd);
   }, [timelineDuration, timelineElements]);
-  const displayedTimelineZoomPercent = useMemo(
-    () => getTimelineZoomPercent(zoomMode, manualZoomPercent),
-    [zoomMode, manualZoomPercent],
+  const refreshPreviewDocumentVersion = useCallback(() => {
+    setPreviewDocumentVersion((v) => v + 1);
+    window.setTimeout(() => setPreviewDocumentVersion((v) => v + 1), 80);
+    window.setTimeout(() => setPreviewDocumentVersion((v) => v + 1), 300);
+  }, []);
+
+  const [timelineVisible, setTimelineVisible] = useState(
+    () =>
+      initialUrlStateRef.current.timelineVisible ??
+      readStudioUiPreferences().timelineVisible ??
+      true,
   );
   const toggleTimelineVisibility = useCallback(() => {
-    setTimelineVisible((visible) => !visible);
+    setTimelineVisible((v) => {
+      writeStudioUiPreferences({ timelineVisible: !v });
+      return !v;
+    });
   }, []);
-  const toggleLeftSidebar = useCallback(() => {
-    setLeftCollapsed((collapsed) => !collapsed);
+  const { appToast, showToast } = useToast();
+  const panelLayout = usePanelLayout({
+    rightCollapsed: initialUrlStateRef.current.rightCollapsed,
+    rightPanelTab: initialUrlStateRef.current.rightPanelTab,
+  });
+  const editHistory = usePersistentEditHistory({ projectId });
+  const domEditSaveTimestampRef = useRef(0);
+  const pendingTimelineEditPathRef = useRef(new Set<string>());
+  const reloadPreview = useCallback(() => {
+    setRefreshKey((k) => k + 1);
   }, []);
-  const refreshCaptureFrameTime = useCallback(() => {
-    setCaptureFrameTime(usePlayerStore.getState().currentTime);
-  }, []);
 
-  useMountEffect(() => {
-    setCaptureFrameTime(usePlayerStore.getState().currentTime);
-    return liveTime.subscribe(setCaptureFrameTime);
+  const fileManager = useFileManager({
+    projectId,
+    showToast,
+    recordEdit: editHistory.recordEdit,
+    domEditSaveTimestampRef,
+    setRefreshKey,
   });
 
-  const captureFrameHref = projectId
-    ? buildFrameCaptureUrl({
-        projectId,
-        compositionPath: activeCompPath,
-        currentTime: captureFrameTime,
-      })
-    : "#";
-  const captureFrameFilename = buildFrameCaptureFilename(activeCompPath, captureFrameTime);
-  useMountEffect(() => () => {
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-  });
-  const handleTimelineToggleHotkey = useCallback(
-    (event: KeyboardEvent) => {
-      if (!shouldHandleTimelineToggleHotkey(event)) return;
-      event.preventDefault();
-      toggleTimelineVisibility();
-    },
-    [toggleTimelineVisibility],
-  );
-
-  useMountEffect(() => {
-    window.addEventListener("keydown", handleTimelineToggleHotkey);
-    return () => {
-      window.removeEventListener("keydown", handleTimelineToggleHotkey);
-    };
-  });
-
-  const syncPreviewTimelineHotkey = useCallback(
-    (iframe: HTMLIFrameElement | null) => {
-      const nextWindow = iframe?.contentWindow ?? null;
-      if (previewHotkeyWindowRef.current === nextWindow) return;
-      if (previewHotkeyWindowRef.current) {
-        previewHotkeyWindowRef.current.removeEventListener("keydown", handleTimelineToggleHotkey);
-      }
-      previewHotkeyWindowRef.current = nextWindow;
-      nextWindow?.addEventListener("keydown", handleTimelineToggleHotkey);
-    },
-    [handleTimelineToggleHotkey],
-  );
-
-  useEffect(
-    () => () => {
-      if (previewHotkeyWindowRef.current) {
-        previewHotkeyWindowRef.current.removeEventListener("keydown", handleTimelineToggleHotkey);
-        previewHotkeyWindowRef.current = null;
-      }
-    },
-    [handleTimelineToggleHotkey],
-  );
-
-  const renderClipContent = useCallback(
-    (el: TimelineElement, style: { clip: string; label: string }): ReactNode => {
-      const pid = projectIdRef.current;
-      if (!pid) return null;
-
-      // Resolve composition source path using the compIdToSrc map
-      let compSrc = el.compositionSrc;
-      if (compSrc && compIdToSrc.size > 0) {
-        const resolved =
-          compIdToSrc.get(el.id) ||
-          compIdToSrc.get(compSrc.replace(/^compositions\//, "").replace(/\.html$/, ""));
-        if (resolved) compSrc = resolved;
-      }
-
-      // Composition clips — always use the comp's own preview URL for thumbnails.
-      // This renders the composition in isolation so we get clean frames
-      // instead of capturing the master at a time when the comp is fading in.
-      if (compSrc) {
-        return (
-          <CompositionThumbnail
-            previewUrl={`/api/projects/${pid}/preview/comp/${compSrc}`}
-            label={getTimelineElementLabel(el)}
-            labelColor={style.label}
-            accentColor={style.clip}
-            selector={el.selector}
-            seekTime={0}
-            duration={el.duration}
-          />
-        );
-      }
-
-      // When drilled into a composition, render all inner elements via
-      // CompositionThumbnail at their start time — most accurate visual.
-      if (activePreviewUrl && el.duration > 0) {
-        return (
-          <CompositionThumbnail
-            previewUrl={activePreviewUrl}
-            label={getTimelineElementLabel(el)}
-            labelColor={style.label}
-            accentColor={style.clip}
-            selector={el.selector}
-            seekTime={el.start}
-            duration={el.duration}
-          />
-        );
-      }
-
-      const htmlPreviewEligible =
-        el.duration > 0 &&
-        effectiveTimelineDuration > 0 &&
-        el.duration < effectiveTimelineDuration * 0.92 &&
-        !/(backdrop|background|overlay|scrim|mask)/i.test(el.id);
-
-      // Audio clips — waveform visualization
-      if (el.tag === "audio") {
-        const previewBase = `/api/projects/${pid}/preview/`;
-        const previewIdx = el.src?.startsWith("http") ? el.src.indexOf(previewBase) : -1;
-        const srcRelative = el.src
-          ? previewIdx !== -1
-            ? decodeURIComponent(el.src.slice(previewIdx + previewBase.length))
-            : el.src.startsWith("http")
-              ? null
-              : el.src
-          : null;
-        const audioUrl = srcRelative
-          ? `/api/projects/${pid}/preview/${srcRelative}`
-          : (el.src ?? "");
-        const waveformUrl = srcRelative
-          ? `/api/projects/${pid}/waveform/${srcRelative}`
-          : undefined;
-        return (
-          <AudioWaveform
-            audioUrl={audioUrl}
-            waveformUrl={waveformUrl}
-            label={getTimelineElementLabel(el)}
-            labelColor={style.label}
-          />
-        );
-      }
-
-      if ((el.tag === "video" || el.tag === "img") && el.src) {
-        const mediaSrc = el.src.startsWith("http")
-          ? el.src
-          : `/api/projects/${pid}/preview/${el.src}`;
-        return (
-          <VideoThumbnail
-            videoSrc={mediaSrc}
-            label={getTimelineElementLabel(el)}
-            labelColor={style.label}
-            duration={el.duration}
-          />
-        );
-      }
-
-      if (htmlPreviewEligible) {
-        return (
-          <CompositionThumbnail
-            previewUrl={`/api/projects/${pid}/preview`}
-            label={getTimelineElementLabel(el)}
-            labelColor={style.label}
-            accentColor={style.clip}
-            selector={el.selector}
-            seekTime={el.start}
-            duration={el.duration}
-          />
-        );
-      }
-
-      return null;
-    },
-    [compIdToSrc, activePreviewUrl, effectiveTimelineDuration],
-  );
-  const timelineToolbar = (
-    <div className="border-b border-neutral-800/40 bg-neutral-950/96">
-      <div className="flex items-center justify-between px-3 py-2">
-        <div className="text-[10px] font-medium uppercase tracking-[0.16em] text-neutral-500">
-          Timeline
-        </div>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setZoomMode("fit")}
-            className={`h-7 px-2.5 rounded-md border text-[11px] font-medium transition-colors ${
-              zoomMode === "fit"
-                ? "border-studio-accent/30 bg-studio-accent/10 text-studio-accent"
-                : "border-neutral-800 text-neutral-400 hover:border-neutral-700 hover:text-neutral-200"
-            }`}
-            title="Fit timeline to width"
-          >
-            Fit
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setZoomMode("manual");
-              setManualZoomPercent(getNextTimelineZoomPercent("out", zoomMode, manualZoomPercent));
-            }}
-            className="h-7 w-7 rounded-md border border-neutral-800 text-neutral-400 transition-colors hover:border-neutral-700 hover:text-neutral-200"
-            title="Zoom out"
-          >
-            -
-          </button>
-          <div className="min-w-[58px] text-center text-[10px] font-medium tabular-nums text-neutral-500">
-            {`${displayedTimelineZoomPercent}%`}
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              setZoomMode("manual");
-              setManualZoomPercent(getNextTimelineZoomPercent("in", zoomMode, manualZoomPercent));
-            }}
-            className="h-7 w-7 rounded-md border border-neutral-800 text-neutral-400 transition-colors hover:border-neutral-700 hover:text-neutral-200"
-            title="Zoom in"
-          >
-            +
-          </button>
-          <button
-            type="button"
-            onClick={toggleTimelineVisibility}
-            className="ml-1 flex h-7 w-7 items-center justify-center rounded-md text-neutral-500 transition-colors hover:bg-neutral-900 hover:text-neutral-200"
-            title={getTimelineToggleTitle(true)}
-            aria-label="Hide timeline editor"
-          >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M5 7h14" />
-              <path d="m8 11 4 4 4-4" />
-            </svg>
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-  const [lintModal, setLintModal] = useState<LintFinding[] | null>(null);
-  const [consoleErrors, setConsoleErrors] = useState<LintFinding[] | null>(null);
-  const [linting, setLinting] = useState(false);
-  const [refreshKey, setRefreshKey] = useState(0);
-  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const projectIdRef = useRef(projectId);
-  const previewIframeRef = useRef<HTMLIFrameElement | null>(null);
-  const consoleErrorsRef = useRef<LintFinding[]>([]);
-
-  // Listen for external file changes (user editing HTML outside the editor).
-  // In dev: use Vite HMR. In embedded/production: use SSE from /api/events.
-  useMountEffect(() => {
-    const handler = () => {
-      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-      refreshTimerRef.current = setTimeout(() => setRefreshKey((k) => k + 1), 400);
-    };
-    if (import.meta.hot) {
-      import.meta.hot.on("hf:file-change", handler);
-      return () => import.meta.hot?.off?.("hf:file-change", handler);
-    }
-    // SSE fallback for embedded studio server
-    const es = new EventSource("/api/events");
-    es.addEventListener("file-change", handler);
-    return () => es.close();
-  });
-  projectIdRef.current = projectId;
-
-  // Load file tree when projectId changes.
-  // Note: This is one of the few places where useEffect with deps is acceptable —
-  // it's data fetching tied to a prop change. Ideally this would use a data-fetching
-  // library (useQuery/useSWR) or the parent component would own the fetch.
-  // eslint-disable-next-line no-restricted-syntax
   useEffect(() => {
-    if (!projectId) return;
-    let cancelled = false;
-    fetch(`/api/projects/${projectId}`)
-      .then((r) => r.json())
-      .then((data: { files?: string[] }) => {
-        if (!cancelled && data.files) setFileTree(data.files);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId]);
+    if (activeCompPathHydrated) return;
+    if (!fileManager.fileTreeLoaded) return;
 
-  const handleFileSelect = useCallback((path: string) => {
-    const pid = projectIdRef.current;
-    if (!pid) return;
-    // Expand left panel to 50vw when opening a file in Code tab
-    setLeftWidth((prev) => Math.max(prev, Math.floor(window.innerWidth * 0.5)));
-    // Skip fetching binary content for media files — just set the path for preview
-    if (isMediaFile(path)) {
-      setEditingFile({ path, content: null });
-      return;
-    }
-    fetch(`/api/projects/${pid}/files/${encodeURIComponent(path)}`)
-      .then((r) => r.json())
-      .then((data: { content?: string }) => {
-        if (data.content != null) {
-          setEditingFile({ path, content: data.content });
-        }
-      })
-      .catch(() => {});
-  }, []);
+    const nextCompPath = normalizeStudioCompositionPath(
+      initialUrlStateRef.current.activeCompPath,
+      fileManager.fileTree,
+    );
+    setActiveCompPath((current) => (current === nextCompPath ? current : nextCompPath));
+    setActiveCompPathHydrated(true);
+  }, [activeCompPathHydrated, fileManager.fileTree, fileManager.fileTreeLoaded]);
 
-  const editingPathRef = useRef(editingFile?.path);
-  editingPathRef.current = editingFile?.path;
+  const previewPersistence = usePreviewPersistence({
+    projectId,
+    showToast,
+    readOptionalProjectFile: fileManager.readOptionalProjectFile,
+    writeProjectFile: fileManager.writeProjectFile,
+    recordEdit: editHistory.recordEdit,
+    previewIframeRef,
+    activeCompPathRef,
+    domEditSaveTimestampRef,
+    reloadPreview: () => setRefreshKey((k) => k + 1),
+    pendingTimelineEditPathRef,
+  });
 
-  const handleContentChange = useCallback((content: string) => {
-    const pid = projectIdRef.current;
-    if (!pid) return;
-    const path = editingPathRef.current;
-    if (!path) return;
+  const timelineEditing = useTimelineEditing({
+    projectId,
+    activeCompPath,
+    timelineElements,
+    showToast,
+    writeProjectFile: fileManager.writeProjectFile,
+    recordEdit: editHistory.recordEdit,
+    domEditSaveTimestampRef,
+    reloadPreview,
+    previewIframeRef,
+    pendingTimelineEditPathRef,
+    uploadProjectFiles: fileManager.uploadProjectFiles,
+  });
 
-    // Debounce the server write (600ms)
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(() => {
-      fetch(`/api/projects/${pid}/files/${encodeURIComponent(path)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "text/plain" },
-        body: content,
-      })
-        .then(() => {
-          if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
-          refreshTimerRef.current = setTimeout(() => setRefreshKey((k) => k + 1), 600);
-        })
-        .catch(() => {});
-    }, 600);
-  }, []);
-
-  const handleTimelineElementMove = useCallback(
-    async (element: TimelineElement, updates: Pick<TimelineElement, "start" | "track">) => {
-      const pid = projectIdRef.current;
-      if (!pid) throw new Error("No active project");
-
-      const targetPath = element.sourceFile || activeCompPath || "index.html";
-      const response = await fetch(`/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`);
-      if (!response.ok) {
-        throw new Error(`Failed to read ${targetPath}`);
-      }
-
-      const data = (await response.json()) as { content?: string };
-      const originalContent = data.content;
-      if (typeof originalContent !== "string") {
-        throw new Error(`Missing file contents for ${targetPath}`);
-      }
-
-      const patchTarget = element.domId
-        ? { id: element.domId, selector: element.selector, selectorIndex: element.selectorIndex }
-        : element.selector
-          ? { selector: element.selector, selectorIndex: element.selectorIndex }
-          : null;
-      if (!patchTarget) {
-        throw new Error(`Timeline element ${element.id} is missing a patchable target`);
-      }
-
-      const resolvedTargetPath = targetPath || "index.html";
-      const relevantElements = timelineElements
-        .map((timelineElement) =>
-          (timelineElement.key ?? timelineElement.id) === (element.key ?? element.id)
-            ? { ...timelineElement, start: updates.start, track: updates.track }
-            : timelineElement,
-        )
-        .filter(
-          (timelineElement) =>
-            (timelineElement.sourceFile || activeCompPath || "index.html") === resolvedTargetPath,
-        );
-      const trackZIndices = buildTrackZIndexMap(
-        relevantElements.map((timelineElement) => timelineElement.track),
-      );
-
-      let patchedContent = applyPatchByTarget(originalContent, patchTarget, {
-        type: "attribute",
-        property: "start",
-        value: formatTimelineAttributeNumber(updates.start),
-      });
-      patchedContent = applyPatchByTarget(patchedContent, patchTarget, {
-        type: "attribute",
-        property: "track-index",
-        value: String(updates.track),
-      });
-      for (const timelineElement of relevantElements) {
-        const elementTarget = timelineElement.domId
-          ? {
-              id: timelineElement.domId,
-              selector: timelineElement.selector,
-              selectorIndex: timelineElement.selectorIndex,
-            }
-          : timelineElement.selector
-            ? {
-                selector: timelineElement.selector,
-                selectorIndex: timelineElement.selectorIndex,
-              }
-            : null;
-        if (!elementTarget) continue;
-        const nextZIndex = trackZIndices.get(timelineElement.track);
-        if (nextZIndex == null) continue;
-        patchedContent = applyPatchByTarget(patchedContent, elementTarget, {
-          type: "inline-style",
-          property: "z-index",
-          value: String(nextZIndex),
-        });
-      }
-
-      if (patchedContent === originalContent) {
-        throw new Error(`Unable to patch timeline element ${element.id} in ${targetPath}`);
-      }
-
-      const saveResponse = await fetch(
-        `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "text/plain" },
-          body: patchedContent,
-        },
-      );
-      if (!saveResponse.ok) {
-        throw new Error(`Failed to save ${targetPath}`);
-      }
-
-      if (editingPathRef.current === targetPath) {
-        setEditingFile({ path: targetPath, content: patchedContent });
-      }
-
-      setRefreshKey((k) => k + 1);
-    },
-    [activeCompPath, timelineElements],
-  );
-
-  const handleTimelineElementResize = useCallback(
-    async (
-      element: TimelineElement,
-      updates: Pick<TimelineElement, "start" | "duration" | "playbackStart">,
-    ) => {
-      const pid = projectIdRef.current;
-      if (!pid) throw new Error("No active project");
-
-      const targetPath = element.sourceFile || activeCompPath || "index.html";
-      const response = await fetch(`/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`);
-      if (!response.ok) {
-        throw new Error(`Failed to read ${targetPath}`);
-      }
-
-      const data = (await response.json()) as { content?: string };
-      const originalContent = data.content;
-      if (typeof originalContent !== "string") {
-        throw new Error(`Missing file contents for ${targetPath}`);
-      }
-
-      const patchTarget = element.domId
-        ? { id: element.domId, selector: element.selector, selectorIndex: element.selectorIndex }
-        : element.selector
-          ? { selector: element.selector, selectorIndex: element.selectorIndex }
-          : null;
-      if (!patchTarget) {
-        throw new Error(`Timeline element ${element.id} is missing a patchable target`);
-      }
-
-      const playbackStartAttrName =
-        element.playbackStartAttr === "playback-start" ? "playback-start" : "media-start";
-      const currentPlaybackStartValue =
-        readAttributeByTarget(originalContent, patchTarget, "playback-start") ??
-        readAttributeByTarget(originalContent, patchTarget, "media-start");
-      const currentPlaybackStart =
-        currentPlaybackStartValue != null ? parseFloat(currentPlaybackStartValue) : undefined;
-      const trimDelta = updates.start - element.start;
-      const fallbackPlaybackStart =
-        updates.playbackStart == null &&
-        trimDelta !== 0 &&
-        Number.isFinite(currentPlaybackStart) &&
-        currentPlaybackStart != null
-          ? Math.max(0, currentPlaybackStart + trimDelta * Math.max(element.playbackRate ?? 1, 0.1))
-          : undefined;
-      const nextPlaybackStart = updates.playbackStart ?? fallbackPlaybackStart;
-
-      let patchedContent = originalContent;
-      patchedContent = applyPatchByTarget(patchedContent, patchTarget, {
-        type: "attribute",
-        property: "start",
-        value: formatTimelineAttributeNumber(updates.start),
-      });
-      patchedContent = applyPatchByTarget(patchedContent, patchTarget, {
-        type: "attribute",
-        property: "duration",
-        value: formatTimelineAttributeNumber(updates.duration),
-      });
-      if (nextPlaybackStart != null) {
-        patchedContent = applyPatchByTarget(patchedContent, patchTarget, {
-          type: "attribute",
-          property: playbackStartAttrName,
-          value: formatTimelineAttributeNumber(nextPlaybackStart),
-        });
-      }
-
-      if (patchedContent === originalContent) {
-        throw new Error(`Unable to patch timeline element ${element.id} in ${targetPath}`);
-      }
-
-      const saveResponse = await fetch(
-        `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
-        {
-          method: "PUT",
-          headers: { "Content-Type": "text/plain" },
-          body: patchedContent,
-        },
-      );
-      if (!saveResponse.ok) {
-        throw new Error(`Failed to save ${targetPath}`);
-      }
-
-      if (editingPathRef.current === targetPath) {
-        setEditingFile({ path: targetPath, content: patchedContent });
-      }
-
-      setRefreshKey((k) => k + 1);
-    },
-    [activeCompPath],
-  );
-
-  const showToast = useCallback((message: string, tone: AppToast["tone"] = "error") => {
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-    setAppToast({ message, tone });
-    toastTimerRef.current = setTimeout(() => setAppToast(null), 4000);
-  }, []);
-
-  const handleCaptureFrameClick = useCallback(
-    async (event: MouseEvent<HTMLAnchorElement>) => {
+  const handleAddBlock = useCallback(
+    (blockName: string) => {
       if (!projectId) return;
-      event.preventDefault();
-
-      const currentTime = usePlayerStore.getState().currentTime;
-      setCaptureFrameTime(currentTime);
-      const href = buildFrameCaptureUrl({
-        projectId,
-        compositionPath: activeCompPath,
-        currentTime,
-      });
-      const filename = buildFrameCaptureFilename(activeCompPath, currentTime);
-
-      try {
-        const response = await fetch(href, { cache: "no-store" });
-        if (!response.ok) {
-          throw new Error(`Capture failed (${response.status})`);
-        }
-        const blob = await response.blob();
-        const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = blobUrl;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Capture failed";
-        showToast(message);
-      }
-    },
-    [activeCompPath, projectId, showToast],
-  );
-
-  const handleTimelineElementDelete = useCallback(
-    async (element: TimelineElement) => {
-      const pid = projectIdRef.current;
-      if (!pid) throw new Error("No active project");
-
-      const targetPath = element.sourceFile || activeCompPath || "index.html";
-      try {
-        const response = await fetch(
-          `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
-        );
-        if (!response.ok) {
-          throw new Error(`Failed to read ${targetPath}`);
-        }
-
-        const data = (await response.json()) as { content?: string };
-        const originalContent = data.content;
-        if (typeof originalContent !== "string") {
-          throw new Error(`Missing file contents for ${targetPath}`);
-        }
-
-        const patchTarget = element.domId
-          ? { id: element.domId, selector: element.selector, selectorIndex: element.selectorIndex }
-          : element.selector
-            ? { selector: element.selector, selectorIndex: element.selectorIndex }
-            : null;
-        if (!patchTarget) {
-          throw new Error(`Timeline element ${element.id} is missing a patchable target`);
-        }
-
-        const resolvedTargetPath = targetPath || "index.html";
-        const remainingElements = timelineElements.filter(
-          (timelineElement) =>
-            (timelineElement.key ?? timelineElement.id) !== (element.key ?? element.id) &&
-            (timelineElement.sourceFile || activeCompPath || "index.html") === resolvedTargetPath,
-        );
-        const trackZIndices = buildTrackZIndexMap(
-          remainingElements.map((timelineElement) => timelineElement.track),
-        );
-
-        const removeResponse = await fetch(
-          `/api/projects/${pid}/file-mutations/remove-element/${encodeURIComponent(targetPath)}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ target: patchTarget }),
-          },
-        );
-        if (!removeResponse.ok) {
-          throw new Error(`Failed to delete ${element.id} from ${targetPath}`);
-        }
-
-        const removeData = (await removeResponse.json()) as {
-          changed?: boolean;
-          content?: string;
-        };
-        let patchedContent =
-          typeof removeData.content === "string" ? removeData.content : originalContent;
-        for (const timelineElement of remainingElements) {
-          const elementTarget = timelineElement.domId
-            ? {
-                id: timelineElement.domId,
-                selector: timelineElement.selector,
-                selectorIndex: timelineElement.selectorIndex,
-              }
-            : timelineElement.selector
-              ? {
-                  selector: timelineElement.selector,
-                  selectorIndex: timelineElement.selectorIndex,
-                }
-              : null;
-          if (!elementTarget) continue;
-          const nextZIndex = trackZIndices.get(timelineElement.track);
-          if (nextZIndex == null) continue;
-          patchedContent = applyPatchByTarget(patchedContent, elementTarget, {
-            type: "inline-style",
-            property: "z-index",
-            value: String(nextZIndex),
-          });
-        }
-
-        const saveResponse = await fetch(
-          `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
-          {
-            method: "PUT",
-            headers: { "Content-Type": "text/plain" },
-            body: patchedContent,
-          },
-        );
-        if (!saveResponse.ok) {
-          throw new Error(`Failed to save ${targetPath}`);
-        }
-
-        if (editingPathRef.current === targetPath) {
-          setEditingFile({ path: targetPath, content: patchedContent });
-        }
-
-        usePlayerStore
-          .getState()
-          .setElements(
-            timelineElements.filter(
-              (timelineElement) =>
-                (timelineElement.key ?? timelineElement.id) !== (element.key ?? element.id),
-            ),
-          );
-        usePlayerStore.getState().setSelectedElementId(null);
-        setRefreshKey((k) => k + 1);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Failed to delete timeline clip";
-        showToast(message);
-      }
-    },
-    [activeCompPath, showToast, timelineElements],
-  );
-
-  const handleBlockedTimelineEdit = useCallback(
-    (_element: TimelineElement) => {
-      const now = Date.now();
-      if (now - lastBlockedTimelineToastAtRef.current < 1500) return;
-      lastBlockedTimelineToastAtRef.current = now;
-      showToast("This clip can’t be moved or resized from the timeline yet.", "info");
-    },
-    [showToast],
-  );
-
-  const refreshFileTree = useCallback(async () => {
-    const pid = projectIdRef.current;
-    if (!pid) return;
-    const res = await fetch(`/api/projects/${pid}`);
-    const data = await res.json();
-    if (data.files) setFileTree(data.files);
-  }, []);
-
-  const uploadProjectFiles = useCallback(
-    async (files: Iterable<File>, dir?: string): Promise<string[]> => {
-      const pid = projectIdRef.current;
-      const fileList = Array.from(files);
-      if (!pid || fileList.length === 0) return [];
-
-      const formData = new FormData();
-      for (const file of fileList) {
-        formData.append("file", file);
-      }
-
-      const qs = dir ? `?dir=${encodeURIComponent(dir)}` : "";
-      try {
-        const res = await fetch(`/api/projects/${pid}/upload${qs}`, {
-          method: "POST",
-          body: formData,
+      void (async () => {
+        const result = await addBlockToProject({
+          projectId,
+          blockName,
+          activeCompPath,
+          previewIframe: previewIframeRef.current,
+          currentTime: usePlayerStore.getState().currentTime,
+          timelineElements,
+          readProjectFile: fileManager.readProjectFile,
+          writeProjectFile: fileManager.writeProjectFile,
+          recordEdit: editHistory.recordEdit,
+          refreshFileTree: fileManager.refreshFileTree,
+          reloadPreview,
+          showToast,
         });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.skipped?.length) {
-            showToast(`Skipped (too large): ${data.skipped.join(", ")}`);
-          }
-          if (data.invalid?.length) {
-            const names = data.invalid.map((entry: { name: string }) => entry.name).join(", ");
-            showToast(`Unsupported media skipped: ${names}`);
-          }
-          await refreshFileTree();
-          setRefreshKey((k) => k + 1);
-          return Array.isArray(data.files) ? data.files : [];
-        } else if (res.status === 413) {
-          showToast("Upload rejected: payload too large");
-        } else {
-          showToast(`Upload failed (${res.status})`);
-        }
-      } catch {
-        showToast("Upload failed: network error");
-      }
-      return [];
-    },
-    [refreshFileTree, showToast],
-  );
-
-  const handleTimelineAssetDrop = useCallback(
-    async (
-      assetPath: string,
-      placement: Pick<TimelineElement, "start" | "track">,
-      durationOverride?: number,
-    ) => {
-      const pid = projectIdRef.current;
-      if (!pid) throw new Error("No active project");
-
-      const kind = getTimelineAssetKind(assetPath);
-      if (!kind) {
-        showToast("Only image, video, and audio assets can be dropped onto the timeline.");
-        return;
-      }
-
-      const targetPath = activeCompPath || "index.html";
-      try {
-        const response = await fetch(
-          `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
-        );
-        if (!response.ok) {
-          throw new Error(`Failed to read ${targetPath}`);
-        }
-
-        const data = (await response.json()) as { content?: string };
-        const originalContent = data.content;
-        if (typeof originalContent !== "string") {
-          throw new Error(`Missing file contents for ${targetPath}`);
-        }
-
-        const normalizedStart = Number(formatTimelineAttributeNumber(placement.start));
-        const duration =
-          Number.isFinite(durationOverride) && durationOverride != null && durationOverride > 0
-            ? durationOverride
-            : await resolveDroppedAssetDuration(pid, assetPath, kind);
-        const normalizedDuration = Number(formatTimelineAttributeNumber(duration));
-        const newId = buildTimelineAssetId(assetPath, collectHtmlIds(originalContent));
-        const resolvedAssetSrc = resolveTimelineAssetSrc(targetPath, assetPath);
-
-        const resolvedTargetPath = targetPath || "index.html";
-        const relevantElements = timelineElements.filter(
-          (timelineElement) =>
-            (timelineElement.sourceFile || activeCompPath || "index.html") === resolvedTargetPath,
-        );
-        const trackZIndices = buildTrackZIndexMap([
-          ...relevantElements.map((timelineElement) => timelineElement.track),
-          placement.track,
-        ]);
-
-        let patchedContent = originalContent;
-        for (const timelineElement of relevantElements) {
-          const elementTarget = timelineElement.domId
-            ? {
-                id: timelineElement.domId,
-                selector: timelineElement.selector,
-                selectorIndex: timelineElement.selectorIndex,
-              }
-            : timelineElement.selector
-              ? {
-                  selector: timelineElement.selector,
-                  selectorIndex: timelineElement.selectorIndex,
-                }
-              : null;
-          if (!elementTarget) continue;
-          const nextZIndex = trackZIndices.get(timelineElement.track);
-          if (nextZIndex == null) continue;
-          patchedContent = applyPatchByTarget(patchedContent, elementTarget, {
-            type: "inline-style",
-            property: "z-index",
-            value: String(nextZIndex),
+        const params = result?.block.type === "hyperframes:block" ? result.block.params : undefined;
+        if (params?.length) {
+          setActiveBlockParams({
+            blockName: result!.block.name,
+            blockTitle: result!.block.title,
+            params,
+            compositionPath: result!.compositionPath,
           });
+          panelLayout.setRightCollapsed(false);
+          panelLayout.setRightPanelTab("block-params");
         }
-
-        patchedContent = insertTimelineAssetIntoSource(
-          patchedContent,
-          buildTimelineAssetInsertHtml({
-            id: newId,
-            assetPath: resolvedAssetSrc,
-            kind,
-            start: normalizedStart,
-            duration: normalizedDuration,
-            track: placement.track,
-            zIndex: trackZIndices.get(placement.track) ?? 1,
-          }),
-        );
-
-        const saveResponse = await fetch(
-          `/api/projects/${pid}/files/${encodeURIComponent(targetPath)}`,
-          {
-            method: "PUT",
-            headers: { "Content-Type": "text/plain" },
-            body: patchedContent,
-          },
-        );
-        if (!saveResponse.ok) {
-          throw new Error(`Failed to save ${targetPath}`);
-        }
-
-        if (editingPathRef.current === targetPath) {
-          setEditingFile({ path: targetPath, content: patchedContent });
-        }
-
-        setRefreshKey((k) => k + 1);
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Failed to drop asset onto timeline";
-        showToast(message);
-      }
+      })();
     },
-    [activeCompPath, showToast, timelineElements],
+    [
+      projectId,
+      activeCompPath,
+      timelineElements,
+      fileManager.readProjectFile,
+      fileManager.writeProjectFile,
+      fileManager.refreshFileTree,
+      editHistory.recordEdit,
+      reloadPreview,
+      showToast,
+      panelLayout,
+    ],
   );
 
-  const handleTimelineFileDrop = useCallback(
-    async (files: File[], placement?: Pick<TimelineElement, "start" | "track">) => {
-      const pid = projectIdRef.current;
-      if (!pid) return;
-      const uploaded = await uploadProjectFiles(files);
-      if (uploaded.length === 0) return;
-      const durations: number[] = [];
-      for (const assetPath of uploaded) {
-        const kind = getTimelineAssetKind(assetPath);
-        const duration = kind ? await resolveDroppedAssetDuration(pid, assetPath, kind) : 0;
-        durations.push(Number(formatTimelineAttributeNumber(duration)));
-      }
-      const placements = buildTimelineFileDropPlacements(
-        placement ?? { start: 0, track: 0 },
-        durations,
-        timelineElements
-          .filter(
-            (timelineElement) =>
-              (timelineElement.sourceFile || activeCompPath || "index.html") ===
-              (activeCompPath || "index.html"),
-          )
-          .map((timelineElement) => ({
-            start: timelineElement.start,
-            duration: timelineElement.duration,
-            track: timelineElement.track,
-          })),
-      );
-      for (const [index, assetPath] of uploaded.entries()) {
-        await handleTimelineAssetDrop(
-          assetPath,
-          placements[index] ?? placements[0],
-          durations[index],
-        );
-      }
-    },
-    [activeCompPath, handleTimelineAssetDrop, timelineElements, uploadProjectFiles],
-  );
-
-  // ── File Management Handlers ──
-
-  const handleCreateFile = useCallback(
-    async (path: string) => {
-      const pid = projectIdRef.current;
-      if (!pid) return;
-      let content = "";
-      if (path.endsWith(".html")) {
-        content =
-          '<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="UTF-8">\n</head>\n<body>\n\n</body>\n</html>\n';
-      }
-      const res = await fetch(`/api/projects/${pid}/files/${encodeURIComponent(path)}`, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: content,
+  const handleTimelineBlockDrop = useCallback(
+    (blockName: string, placement: { start: number; track: number }) => {
+      if (!projectId) return;
+      void addBlockToProject({
+        projectId,
+        blockName,
+        activeCompPath,
+        placement,
+        previewIframe: previewIframeRef.current,
+        currentTime: usePlayerStore.getState().currentTime,
+        timelineElements,
+        readProjectFile: fileManager.readProjectFile,
+        writeProjectFile: fileManager.writeProjectFile,
+        recordEdit: editHistory.recordEdit,
+        refreshFileTree: fileManager.refreshFileTree,
+        reloadPreview,
+        showToast,
       });
-      if (res.ok) {
-        await refreshFileTree();
-        handleFileSelect(path);
-      } else {
-        const err = await res.json().catch(() => ({ error: "unknown" }));
-        console.error(`Create file failed: ${err.error}`);
-      }
     },
-    [refreshFileTree, handleFileSelect],
+    [
+      projectId,
+      activeCompPath,
+      timelineElements,
+      fileManager.readProjectFile,
+      fileManager.writeProjectFile,
+      fileManager.refreshFileTree,
+      editHistory.recordEdit,
+      reloadPreview,
+      showToast,
+    ],
   );
 
-  const handleCreateFolder = useCallback(
-    async (path: string) => {
-      const pid = projectIdRef.current;
-      if (!pid) return;
-      // Create a .gitkeep inside the folder so it appears in the tree
-      const res = await fetch(
-        `/api/projects/${pid}/files/${encodeURIComponent(path + "/.gitkeep")}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "text/plain" },
-          body: "",
-        },
-      );
-      if (res.ok) {
-        await refreshFileTree();
-      } else {
-        const err = await res.json().catch(() => ({ error: "unknown" }));
-        console.error(`Create folder failed: ${err.error}`);
-      }
-    },
-    [refreshFileTree],
-  );
-
-  const handleDeleteFile = useCallback(
-    async (path: string) => {
-      const pid = projectIdRef.current;
-      if (!pid) return;
-      const res = await fetch(`/api/projects/${pid}/files/${encodeURIComponent(path)}`, {
-        method: "DELETE",
+  const handlePreviewBlockDrop = useCallback(
+    (blockName: string, position: { left: number; top: number }) => {
+      if (!projectId) return;
+      void addBlockToProject({
+        projectId,
+        blockName,
+        activeCompPath,
+        visualPosition: position,
+        previewIframe: previewIframeRef.current,
+        currentTime: usePlayerStore.getState().currentTime,
+        timelineElements,
+        readProjectFile: fileManager.readProjectFile,
+        writeProjectFile: fileManager.writeProjectFile,
+        recordEdit: editHistory.recordEdit,
+        refreshFileTree: fileManager.refreshFileTree,
+        reloadPreview,
+        showToast,
       });
-      if (res.ok) {
-        if (editingPathRef.current === path) setEditingFile(null);
-        await refreshFileTree();
-      } else {
-        const err = await res.json().catch(() => ({ error: "unknown" }));
-        console.error(`Delete failed: ${err.error}`);
-      }
     },
-    [refreshFileTree],
+    [
+      projectId,
+      activeCompPath,
+      timelineElements,
+      fileManager.readProjectFile,
+      fileManager.writeProjectFile,
+      fileManager.refreshFileTree,
+      editHistory.recordEdit,
+      reloadPreview,
+      showToast,
+    ],
   );
 
-  const handleRenameFile = useCallback(
-    async (oldPath: string, newPath: string) => {
-      const pid = projectIdRef.current;
-      if (!pid) return;
-      const res = await fetch(`/api/projects/${pid}/files/${encodeURIComponent(oldPath)}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ newPath }),
-      });
-      if (res.ok) {
-        if (editingPathRef.current === oldPath) {
-          handleFileSelect(newPath);
-        }
-        await refreshFileTree();
-        // Refresh preview — references in compositions may have been updated
-        setRefreshKey((k) => k + 1);
-      } else {
-        const err = await res.json().catch(() => ({ error: "unknown" }));
-        console.error(`Rename failed: ${err.error}`);
-      }
+  const clearDomSelectionRef = useRef<() => void>(() => {});
+  const domEditSelectionBridgeRef = useRef<DomEditSelection | null>(null);
+  const handleDomEditElementDeleteRef = useRef<(s: DomEditSelection) => Promise<void>>(
+    async () => {},
+  );
+  const domEditDeleteBridge = async (s: DomEditSelection) =>
+    handleDomEditElementDeleteRef.current(s);
+  const { handleCopy, handlePaste, handleCut } = useClipboard({
+    projectId,
+    activeCompPath,
+    domEditSelectionRef: domEditSelectionBridgeRef,
+    showToast,
+    writeProjectFile: fileManager.writeProjectFile,
+    recordEdit: editHistory.recordEdit,
+    domEditSaveTimestampRef,
+    reloadPreview,
+    handleTimelineElementDelete: timelineEditing.handleTimelineElementDelete,
+    handleDomEditElementDelete: domEditDeleteBridge,
+    previewIframeRef,
+  });
+  const appHotkeys = useAppHotkeys({
+    toggleTimelineVisibility,
+    handleTimelineElementDelete: timelineEditing.handleTimelineElementDelete,
+    handleDomEditElementDelete: domEditDeleteBridge,
+    domEditSelectionRef: domEditSelectionBridgeRef,
+    clearDomSelectionRef,
+    editHistory,
+    readOptionalProjectFile: fileManager.readOptionalProjectFile,
+    readProjectFile: fileManager.readProjectFile,
+    writeProjectFile: fileManager.writeProjectFile,
+    domEditSaveTimestampRef,
+    showToast,
+    syncHistoryPreviewAfterApply: previewPersistence.syncHistoryPreviewAfterApply,
+    waitForPendingDomEditSaves: previewPersistence.waitForPendingDomEditSaves,
+    leftSidebarRef,
+    handleCopy,
+    handlePaste,
+    handleCut,
+  });
+
+  const selectSidebarTabStable = useCallback(
+    (tab: SidebarTab) => leftSidebarRef.current?.selectTab(tab),
+    [],
+  );
+  const getSidebarTabStable = useCallback(
+    () => leftSidebarRef.current?.getTab() ?? "compositions",
+    [],
+  );
+
+  const domEditSession = useDomEditSession({
+    projectId,
+    activeCompPath,
+    isMasterView,
+    compIdToSrc,
+    captionEditMode,
+    compositionLoading,
+    previewIframeRef,
+    timelineElements,
+    currentTime,
+    setSelectedTimelineElementId,
+    setRightCollapsed: panelLayout.setRightCollapsed,
+    setRightPanelTab: panelLayout.setRightPanelTab,
+    showToast,
+    refreshPreviewDocumentVersion,
+    queueDomEditSave: previewPersistence.queueDomEditSave,
+    readProjectFile: fileManager.readProjectFile,
+    writeProjectFile: fileManager.writeProjectFile,
+    domEditSaveTimestampRef,
+    editHistory: { recordEdit: editHistory.recordEdit },
+    fileTree: fileManager.fileTree,
+    importedFontAssetsRef: fileManager.importedFontAssetsRef,
+    projectDir: fileManager.projectDir,
+    projectIdRef: fileManager.projectIdRef,
+    previewIframe,
+    refreshKey,
+    rightPanelTab: panelLayout.rightPanelTab,
+    applyStudioManualEditsToPreviewRef: previewPersistence.applyStudioManualEditsToPreviewRef,
+    syncPreviewHistoryHotkey: appHotkeys.syncPreviewHistoryHotkey,
+    reloadPreview,
+    setRefreshKey,
+    openSourceForSelection: fileManager.openSourceForSelection,
+    selectSidebarTab: selectSidebarTabStable,
+    getSidebarTab: getSidebarTabStable,
+  });
+
+  domEditSelectionBridgeRef.current = domEditSession.domEditSelection;
+  clearDomSelectionRef.current = domEditSession.clearDomSelection;
+  handleDomEditElementDeleteRef.current = domEditSession.handleDomEditElementDelete;
+
+  useCaptionDetection({
+    projectId,
+    activeCompPath,
+    compIdToSrc,
+    captionEditMode,
+    captionHasSelection,
+    previewIframeRef,
+    captionSync,
+    setRightCollapsed: panelLayout.setRightCollapsed,
+  });
+
+  const renderClipContent = useRenderClipContent({
+    projectIdRef: fileManager.projectIdRef,
+    compIdToSrc,
+    activePreviewUrl,
+    effectiveTimelineDuration,
+  });
+
+  const compositionDimensions = useCompositionDimensions();
+  const { lintModal, linting, handleLint, closeLintModal } = useLintModal(projectId);
+  const frameCapture = useFrameCapture({
+    projectId,
+    activeCompPath,
+    showToast,
+    waitForPendingDomEditSaves: previewPersistence.waitForPendingDomEditSaves,
+  });
+  const {
+    consoleErrors,
+    setConsoleErrors,
+    resetErrors: resetConsoleErrors,
+  } = useConsoleErrorCapture(previewIframe);
+
+  const [globalDragOver, setGlobalDragOver] = useState(false);
+  const dragCounterRef = useRef(0);
+
+  const { syncPreviewTimelineHotkey, syncPreviewHistoryHotkey } = appHotkeys;
+  const handlePreviewIframeRef = useCallback(
+    (iframe: HTMLIFrameElement | null) => {
+      previewIframeRef.current = iframe;
+      setPreviewIframe(iframe);
+      syncPreviewTimelineHotkey(iframe);
+      syncPreviewHistoryHotkey(iframe);
+      resetConsoleErrors();
+      refreshPreviewDocumentVersion();
     },
-    [refreshFileTree, handleFileSelect],
+    [
+      refreshPreviewDocumentVersion,
+      resetConsoleErrors,
+      syncPreviewHistoryHotkey,
+      syncPreviewTimelineHotkey,
+    ],
   );
 
-  const handleDuplicateFile = useCallback(
-    async (path: string) => {
-      const pid = projectIdRef.current;
-      if (!pid) return;
-      const res = await fetch(`/api/projects/${pid}/duplicate-file`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        await refreshFileTree();
-        if (data.path) handleFileSelect(data.path);
-      } else {
-        const err = await res.json().catch(() => ({ error: "unknown" }));
-        console.error(`Duplicate failed: ${err.error}`);
-      }
+  const handleSelectComposition = useCallback(
+    (comp: string) => {
+      setActiveCompPath(comp === "index.html" || comp.startsWith("compositions/") ? comp : null);
+      fileManager.setEditingFile({ path: comp, content: null });
+      fetch(`/api/projects/${projectId}/files/${comp}`)
+        .then((r) => r.json())
+        .then((data) => fileManager.setEditingFile({ path: comp, content: data.content }))
+        .catch(() => {});
     },
-    [refreshFileTree, handleFileSelect],
+    [projectId, fileManager],
   );
 
-  const handleMoveFile = handleRenameFile;
+  const selectedStudioMotion =
+    STUDIO_INSPECTOR_PANELS_ENABLED && domEditSession.domEditSelection
+      ? readStudioMotionFromElement(domEditSession.domEditSelection.element)
+      : null;
+  const layersPanelActive =
+    STUDIO_INSPECTOR_PANELS_ENABLED && panelLayout.rightPanelTab === "layers";
+  const designPanelActive =
+    STUDIO_INSPECTOR_PANELS_ENABLED && panelLayout.rightPanelTab === "design";
+  const motionPanelActive =
+    STUDIO_INSPECTOR_PANELS_ENABLED &&
+    STUDIO_MOTION_PANEL_ENABLED &&
+    panelLayout.rightPanelTab === "motion";
+  const inspectorPanelActive = layersPanelActive || designPanelActive || motionPanelActive;
+  const shouldShowSelectedDomBounds =
+    inspectorPanelActive && !panelLayout.rightCollapsed && !isPlaying;
+  const inspectorButtonActive =
+    STUDIO_INSPECTOR_PANELS_ENABLED && !panelLayout.rightCollapsed && inspectorPanelActive;
 
-  const handleImportFiles = useCallback(
-    async (files: FileList | File[], dir?: string) => {
-      void uploadProjectFiles(Array.from(files), dir);
+  useStudioUrlState({
+    projectId,
+    activeCompPath,
+    currentTime,
+    duration: effectiveTimelineDuration,
+    isPlaying,
+    compositionLoading,
+    refreshKey,
+    previewIframeRef,
+    rightPanelTab: panelLayout.rightPanelTab,
+    rightCollapsed: panelLayout.rightCollapsed,
+    timelineVisible,
+    activeCompPathHydrated,
+    domEditSelection: domEditSession.domEditSelection,
+    buildDomSelectionFromTarget: domEditSession.buildDomSelectionFromTarget,
+    applyDomSelection: domEditSession.applyDomSelection,
+    initialState: initialUrlStateRef.current,
+  });
+
+  // StudioProvider performs its own useMemo — no need for a second memo here.
+  const studioCtxValue: StudioContextValue = {
+    projectId: projectId!,
+    activeCompPath,
+    setActiveCompPath,
+    showToast,
+    previewIframeRef,
+    captionEditMode,
+    compositionLoading,
+    refreshKey,
+    setRefreshKey,
+    currentTime,
+    timelineElements,
+    isPlaying,
+    editHistory: {
+      canUndo: editHistory.canUndo,
+      canRedo: editHistory.canRedo,
+      undoLabel: editHistory.undoLabel,
+      redoLabel: editHistory.redoLabel,
     },
-    [uploadProjectFiles],
-  );
-
-  const handleLint = useCallback(async () => {
-    const pid = projectIdRef.current;
-    if (!pid) return;
-    setLinting(true);
-    try {
-      const res = await fetch(`/api/projects/${pid}/lint`);
-      const data = await res.json();
-      const findings: LintFinding[] = (data.findings ?? []).map(
-        (f: { severity?: string; message?: string; file?: string; fixHint?: string }) => ({
-          severity: f.severity === "error" ? ("error" as const) : ("warning" as const),
-          message: f.message ?? "",
-          file: f.file,
-          fixHint: f.fixHint,
-        }),
-      );
-      setLintModal(findings);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setLintModal([{ severity: "error", message: `Failed to run lint: ${msg}` }]);
-    } finally {
-      setLinting(false);
-    }
-  }, []);
-
-  // Panel resize via pointer events (works for both left sidebar and right panel)
-  const handlePanelResizeStart = useCallback(
-    (side: "left" | "right", e: React.PointerEvent) => {
-      e.preventDefault();
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
-      panelDragRef.current = {
-        side,
-        startX: e.clientX,
-        startW: side === "left" ? leftWidth : rightWidth,
-      };
+    handleUndo: appHotkeys.handleUndo,
+    handleRedo: appHotkeys.handleRedo,
+    renderQueue: {
+      jobs: renderQueue.jobs,
+      isRendering: renderQueue.isRendering,
+      deleteRender: renderQueue.deleteRender,
+      clearCompleted: renderQueue.clearCompleted,
+      startRender: renderQueue.startRender as (options: unknown) => Promise<void>,
     },
-    [leftWidth, rightWidth],
-  );
+    compositionDimensions,
+    waitForPendingDomEditSaves: previewPersistence.waitForPendingDomEditSaves,
+    handlePreviewIframeRef,
+    refreshPreviewDocumentVersion,
+    timelineVisible,
+    toggleTimelineVisibility,
+  };
 
-  const handlePanelResizeMove = useCallback((e: React.PointerEvent) => {
-    const drag = panelDragRef.current;
-    if (!drag) return;
-    const delta = e.clientX - drag.startX;
-    const maxLeft = Math.floor(window.innerWidth * 0.5);
-    const newW = Math.max(
-      160,
-      Math.min(
-        drag.side === "left" ? maxLeft : 600,
-        drag.startW + (drag.side === "left" ? delta : -delta),
-      ),
-    );
-    if (drag.side === "left") setLeftWidth(newW);
-    else setRightWidth(newW);
-  }, []);
-
-  const handlePanelResizeEnd = useCallback(() => {
-    panelDragRef.current = null;
-  }, []);
-
-  const compositions = useMemo(
-    () => fileTree.filter((f) => f === "index.html" || f.startsWith("compositions/")),
-    [fileTree],
-  );
-  const assets = useMemo(
-    () =>
-      fileTree.filter((f) => !f.endsWith(".html") && !f.endsWith(".md") && !f.endsWith(".json")),
-    [fileTree],
-  );
-
-  if (resolving || !projectId) {
-    return (
-      <div className="h-full w-full bg-neutral-950 flex items-center justify-center">
-        <div className="w-4 h-4 rounded-full bg-studio-accent animate-pulse" />
-      </div>
-    );
+  if (resolving || waitingForServer || !projectId) {
+    return <StudioSplash waiting={waitingForServer} />;
   }
 
-  // At this point projectId is guaranteed non-null (narrowed by the guard above)
-
+  const timelineToolbar = <TimelineToolbar toggleTimelineVisibility={toggleTimelineVisibility} />;
   return (
-    <div
-      className="flex flex-col h-full w-full bg-neutral-950 relative"
-      onDragOver={(e) => {
-        if (!e.dataTransfer.types.includes("Files")) return;
-        e.preventDefault();
-      }}
-      onDragEnter={(e) => {
-        if (!e.dataTransfer.types.includes("Files")) return;
-        e.preventDefault();
-        dragCounterRef.current++;
-        setGlobalDragOver(true);
-      }}
-      onDragLeave={() => {
-        dragCounterRef.current--;
-        if (dragCounterRef.current === 0) setGlobalDragOver(false);
-      }}
-      onDrop={(e) => {
-        dragCounterRef.current = 0;
-        setGlobalDragOver(false);
-        // Skip if a child (e.g. AssetsTab) already handled the drop
-        if (e.defaultPrevented) return;
-        e.preventDefault();
-        if (e.dataTransfer.files.length) handleImportFiles(e.dataTransfer.files);
-      }}
-    >
-      {/* Header bar */}
-      <div className="flex items-center justify-between h-10 px-3 bg-neutral-900 border-b border-neutral-800 flex-shrink-0">
-        {/* Left: project name */}
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] font-medium text-neutral-400">{projectId}</span>
-        </div>
-        {/* Right: toolbar buttons */}
-        <div className="flex items-center gap-1.5">
-          <a
-            href={captureFrameHref}
-            download={captureFrameFilename}
-            onClick={handleCaptureFrameClick}
-            onFocus={refreshCaptureFrameTime}
-            onPointerDown={refreshCaptureFrameTime}
-            className="h-7 flex items-center gap-1.5 px-2.5 rounded-md text-[11px] font-medium border border-neutral-700 text-neutral-300 transition-colors hover:border-neutral-500 hover:bg-neutral-800"
-            title="Capture current frame"
-            aria-label="Capture current frame"
-          >
-            <Camera size={14} />
-            <span>Capture</span>
-          </a>
-          <button
-            onClick={() => setRightCollapsed((v) => !v)}
-            className={`h-7 flex items-center gap-1.5 px-2.5 rounded-md text-[11px] font-medium border transition-colors ${
-              !rightCollapsed
-                ? "text-studio-accent bg-studio-accent/10 border-studio-accent/30"
-                : "text-neutral-500 hover:text-neutral-300 hover:bg-neutral-800 border-transparent"
-            }`}
-          >
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
+    <StudioProvider value={studioCtxValue}>
+      <PanelLayoutProvider value={panelLayout}>
+        <FileManagerProvider value={fileManager}>
+          <DomEditProvider value={domEditSession}>
+            <div
+              className="flex flex-col h-full w-full bg-neutral-950 relative"
+              onDragOver={(e) => {
+                if (!e.dataTransfer.types.includes("Files")) return;
+                e.preventDefault();
+              }}
+              onDragEnter={(e) => {
+                if (!e.dataTransfer.types.includes("Files")) return;
+                e.preventDefault();
+                dragCounterRef.current++;
+                setGlobalDragOver(true);
+              }}
+              onDragLeave={() => {
+                dragCounterRef.current--;
+                if (dragCounterRef.current === 0) setGlobalDragOver(false);
+              }}
+              onDrop={(e) => {
+                dragCounterRef.current = 0;
+                setGlobalDragOver(false);
+                if (e.defaultPrevented) return;
+                e.preventDefault();
+                if (e.dataTransfer.files.length)
+                  fileManager.handleImportFiles(e.dataTransfer.files);
+              }}
             >
-              <circle cx="12" cy="12" r="10" />
-              <polygon points="10 8 16 12 10 16" fill="currentColor" stroke="none" />
-            </svg>
-            Renders
-            {renderQueue.jobs.length > 0 ? ` (${renderQueue.jobs.length})` : ""}
-          </button>
-        </div>
-      </div>
+              <StudioHeader
+                captureFrameHref={frameCapture.captureFrameHref}
+                captureFrameFilename={frameCapture.captureFrameFilename}
+                handleCaptureFrameClick={frameCapture.handleCaptureFrameClick}
+                refreshCaptureFrameTime={frameCapture.refreshCaptureFrameTime}
+                inspectorButtonActive={inspectorButtonActive}
+                inspectorPanelActive={inspectorPanelActive}
+              />
 
-      {/* Main content: sidebar + preview + right panel */}
-      <div className="flex flex-1 min-h-0">
-        {/* Left sidebar: Compositions + Assets (resizable, collapsible) */}
-        {leftCollapsed ? (
-          <div className="flex w-10 flex-shrink-0 flex-col items-center border-r border-neutral-800/50 bg-neutral-950 pt-1">
-            <button
-              type="button"
-              onClick={toggleLeftSidebar}
-              className="flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-neutral-500 transition-colors hover:border-neutral-800 hover:bg-neutral-900 hover:text-neutral-300"
-              title="Show sidebar"
-              aria-label="Show sidebar"
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M5 4v16" />
-                <path d="m10 7 5 5-5 5" />
-              </svg>
-            </button>
-          </div>
-        ) : (
-          <LeftSidebar
-            width={leftWidth}
-            projectId={projectId}
-            compositions={compositions}
-            assets={assets}
-            activeComposition={editingFile?.path ?? null}
-            onSelectComposition={(comp) => {
-              // Set active composition for preview drill-down
-              // Don't increment refreshKey — that reloads the master iframe and
-              // overrides the composition navigation. Let activeCompositionPath
-              // handle the preview change via the composition stack.
-              setActiveCompPath(
-                comp === "index.html" || comp.startsWith("compositions/") ? comp : null,
-              );
-              // Load file content for code editor
-              setEditingFile({ path: comp, content: null });
-              fetch(`/api/projects/${projectId}/files/${comp}`)
-                .then((r) => r.json())
-                .then((data) => setEditingFile({ path: comp, content: data.content }))
-                .catch(() => {});
-            }}
-            fileTree={fileTree}
-            editingFile={editingFile}
-            onSelectFile={handleFileSelect}
-            onCreateFile={handleCreateFile}
-            onCreateFolder={handleCreateFolder}
-            onDeleteFile={handleDeleteFile}
-            onRenameFile={handleRenameFile}
-            onDuplicateFile={handleDuplicateFile}
-            onMoveFile={handleMoveFile}
-            onImportFiles={handleImportFiles}
-            codeChildren={
-              editingFile ? (
-                isMediaFile(editingFile.path) ? (
-                  <MediaPreview projectId={projectId ?? ""} filePath={editingFile.path} />
-                ) : (
-                  <SourceEditor
-                    content={editingFile.content ?? ""}
-                    filePath={editingFile.path}
-                    onChange={handleContentChange}
+              <div className="flex flex-1 min-h-0">
+                <StudioLeftSidebar
+                  leftSidebarRef={leftSidebarRef}
+                  onSelectComposition={handleSelectComposition}
+                  onAddBlock={handleAddBlock}
+                  onPreviewBlock={setBlockPreview}
+                  onLint={handleLint}
+                  linting={linting}
+                />
+                <StudioPreviewArea
+                  timelineToolbar={timelineToolbar}
+                  renderClipContent={renderClipContent}
+                  handleTimelineElementDelete={timelineEditing.handleTimelineElementDelete}
+                  handleTimelineAssetDrop={timelineEditing.handleTimelineAssetDrop}
+                  handleTimelineBlockDrop={handleTimelineBlockDrop}
+                  handlePreviewBlockDrop={handlePreviewBlockDrop}
+                  handleTimelineFileDrop={timelineEditing.handleTimelineFileDrop}
+                  handleTimelineElementMove={timelineEditing.handleTimelineElementMove}
+                  handleTimelineElementResize={timelineEditing.handleTimelineElementResize}
+                  handleBlockedTimelineEdit={timelineEditing.handleBlockedTimelineEdit}
+                  setCompIdToSrc={setCompIdToSrc}
+                  setCompositionLoading={setCompositionLoading}
+                  shouldShowSelectedDomBounds={shouldShowSelectedDomBounds}
+                  blockPreview={blockPreview}
+                />
+
+                {!panelLayout.rightCollapsed && (
+                  <StudioRightPanel
+                    selectedStudioMotion={selectedStudioMotion}
+                    designPanelActive={designPanelActive}
+                    motionPanelActive={motionPanelActive}
+                    activeBlockParams={activeBlockParams}
+                    onCloseBlockParams={() => {
+                      setActiveBlockParams(null);
+                      panelLayout.setRightPanelTab("design");
+                    }}
                   />
-                )
-              ) : undefined
-            }
-            onLint={handleLint}
-            linting={linting}
-            onToggleCollapse={toggleLeftSidebar}
-          />
-        )}
+                )}
+              </div>
 
-        {/* Left resize handle */}
-        {!leftCollapsed && (
-          <div
-            className="group w-2 flex-shrink-0 cursor-col-resize flex items-center justify-center"
-            style={{ touchAction: "none" }}
-            onPointerDown={(e) => handlePanelResizeStart("left", e)}
-            onPointerMove={handlePanelResizeMove}
-            onPointerUp={handlePanelResizeEnd}
-          >
-            <div className="h-[52px] w-px bg-white/12 transition-colors group-hover:bg-white/18 group-active:bg-white/24" />
-          </div>
-        )}
+              {lintModal !== null && (
+                <LintModal findings={lintModal} projectId={projectId} onClose={closeLintModal} />
+              )}
 
-        {/* Center: Preview */}
-        <div className="flex-1 relative min-w-0">
-          <NLELayout
-            projectId={projectId}
-            refreshKey={refreshKey}
-            activeCompositionPath={activeCompPath}
-            timelineToolbar={timelineToolbar}
-            renderClipContent={renderClipContent}
-            onDeleteElement={handleTimelineElementDelete}
-            onAssetDrop={handleTimelineAssetDrop}
-            onFileDrop={handleTimelineFileDrop}
-            onMoveElement={handleTimelineElementMove}
-            onResizeElement={handleTimelineElementResize}
-            onBlockedEditAttempt={handleBlockedTimelineEdit}
-            onCompIdToSrcChange={setCompIdToSrc}
-            onCompositionChange={(compPath) => {
-              // Sync activeCompPath when user drills down via timeline double-click
-              // or navigates back via breadcrumb — keeps sidebar + thumbnails in sync.
-              setActiveCompPath(compPath);
-            }}
-            onIframeRef={(iframe) => {
-              previewIframeRef.current = iframe;
-              syncPreviewTimelineHotkey(iframe);
-              consoleErrorsRef.current = [];
-              setConsoleErrors(null);
-              if (!iframe) return;
-
-              // Attach error capture after each iframe load (content resets on navigation)
-              const attachErrorCapture = () => {
-                try {
-                  const win = iframe.contentWindow as (Window & typeof globalThis) | null;
-                  if (!win) return;
-                  // Guard against double-patching
-                  if ((win as unknown as Record<string, unknown>).__hfErrorCapture) return;
-                  (win as unknown as Record<string, unknown>).__hfErrorCapture = true;
-                  const origError = win.console.error.bind(win.console);
-                  win.console.error = function (...args: unknown[]) {
-                    origError(...args);
-                    const text = args
-                      .map((a) => (a instanceof Error ? a.message : String(a)))
-                      .join(" ");
-                    if (text.includes("favicon")) return;
-                    consoleErrorsRef.current = [
-                      ...consoleErrorsRef.current,
-                      { severity: "error", message: text },
-                    ];
-                    setConsoleErrors([...consoleErrorsRef.current]);
-                  };
-                  win.addEventListener("error", (e: ErrorEvent) => {
-                    const text = e.message || String(e);
-                    consoleErrorsRef.current = [
-                      ...consoleErrorsRef.current,
-                      { severity: "error", message: text },
-                    ];
-                    setConsoleErrors([...consoleErrorsRef.current]);
-                  });
-                } catch {
-                  // cross-origin — can't attach
-                }
-              };
-              // Attach now (iframe may already be loaded) and on future loads
-              attachErrorCapture();
-              iframe.addEventListener("load", () => {
-                consoleErrorsRef.current = [];
-                setConsoleErrors(null);
-                attachErrorCapture();
-              });
-            }}
-            previewOverlay={
-              captionEditMode ? <CaptionOverlay iframeRef={previewIframeRef} /> : undefined
-            }
-            timelineFooter={
-              captionEditMode ? (
-                <div
-                  className="border-t border-neutral-800/30 flex-shrink-0"
-                  style={{ height: 60 }}
-                >
-                  <div className="flex items-center gap-1.5 px-2 py-0.5">
-                    <span className="text-[9px] font-medium text-neutral-500 uppercase tracking-wider">
-                      Captions
-                    </span>
-                  </div>
-                  <CaptionTimeline pixelsPerSecond={100} />
-                </div>
-              ) : undefined
-            }
-            timelineVisible={timelineVisible}
-            onToggleTimeline={toggleTimelineVisibility}
-          />
-        </div>
-
-        {/* Right panel: Renders-only (resizable, collapsible via header Renders button) */}
-        {!rightCollapsed && (
-          <>
-            <div
-              className="group w-2 flex-shrink-0 cursor-col-resize flex items-center justify-center"
-              style={{ touchAction: "none" }}
-              onPointerDown={(e) => handlePanelResizeStart("right", e)}
-              onPointerMove={handlePanelResizeMove}
-              onPointerUp={handlePanelResizeEnd}
-            >
-              <div className="h-[52px] w-px bg-white/12 transition-colors group-hover:bg-white/18 group-active:bg-white/24" />
-            </div>
-            <div
-              className="flex flex-col border-l border-neutral-800 bg-neutral-900 flex-shrink-0"
-              style={{ width: rightWidth }}
-            >
-              {captionEditMode ? (
-                <CaptionPropertyPanel iframeRef={previewIframeRef} />
-              ) : (
-                <RenderQueue
-                  jobs={renderQueue.jobs}
+              {consoleErrors !== null && consoleErrors.length > 0 && (
+                <LintModal
+                  findings={consoleErrors}
                   projectId={projectId}
-                  onDelete={renderQueue.deleteRender}
-                  onClearCompleted={renderQueue.clearCompleted}
-                  onStartRender={(format, quality) => renderQueue.startRender(30, quality, format)}
-                  isRendering={renderQueue.isRendering}
+                  onClose={() => setConsoleErrors(null)}
                 />
               )}
+
+              {domEditSession.agentModalOpen && domEditSession.domEditSelection && (
+                <AskAgentModal
+                  selectionLabel={domEditSession.domEditSelection.label}
+                  anchorPoint={domEditSession.agentModalAnchorPoint}
+                  onSubmit={domEditSession.handleAgentModalSubmit}
+                  onClose={() => {
+                    domEditSession.setAgentModalOpen(false);
+                    domEditSession.setAgentPromptSelectionContext(undefined);
+                    domEditSession.setAgentModalAnchorPoint(null);
+                  }}
+                />
+              )}
+
+              {globalDragOver && <StudioGlobalDragOverlay />}
+
+              {appToast && (
+                <div
+                  className={`absolute bottom-6 left-1/2 -translate-x-1/2 z-[91] px-4 py-2 rounded-lg border text-sm shadow-lg animate-in fade-in slide-in-from-bottom-2 ${
+                    appToast.tone === "error"
+                      ? "bg-red-900/90 border-red-700/50 text-red-200"
+                      : "bg-neutral-900/95 border-neutral-700/60 text-neutral-100"
+                  }`}
+                >
+                  {appToast.message}
+                </div>
+              )}
             </div>
-          </>
-        )}
-      </div>
-
-      {/* Lint modal */}
-      {lintModal !== null && projectId && (
-        <LintModal findings={lintModal} projectId={projectId} onClose={() => setLintModal(null)} />
-      )}
-
-      {/* Console errors modal — auto-shows when composition has runtime errors */}
-      {consoleErrors !== null && consoleErrors.length > 0 && projectId && (
-        <LintModal
-          findings={consoleErrors}
-          projectId={projectId}
-          onClose={() => setConsoleErrors(null)}
-        />
-      )}
-
-      {/* Global drag-drop overlay */}
-      {globalDragOver && (
-        <div className="absolute inset-0 z-[90] flex items-center justify-center bg-black/50 backdrop-blur-sm pointer-events-none">
-          <div className="flex flex-col items-center gap-3 px-8 py-6 rounded-xl border-2 border-dashed border-studio-accent/60 bg-studio-accent/[0.06]">
-            <svg
-              width="32"
-              height="32"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="text-studio-accent"
-            >
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-            <span className="text-sm font-medium text-studio-accent">
-              Drop files to import into project
-            </span>
-          </div>
-        </div>
-      )}
-      {appToast && (
-        <div
-          className={`absolute bottom-6 left-1/2 -translate-x-1/2 z-[91] px-4 py-2 rounded-lg border text-sm shadow-lg animate-in fade-in slide-in-from-bottom-2 ${
-            appToast.tone === "error"
-              ? "bg-red-900/90 border-red-700/50 text-red-200"
-              : "bg-neutral-900/95 border-neutral-700/60 text-neutral-100"
-          }`}
-        >
-          {appToast.message}
-        </div>
-      )}
-    </div>
+          </DomEditProvider>
+        </FileManagerProvider>
+      </PanelLayoutProvider>
+    </StudioProvider>
   );
 }

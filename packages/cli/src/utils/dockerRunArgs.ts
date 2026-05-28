@@ -7,6 +7,8 @@
  * a test in `dockerRunArgs.test.ts` — that combination is what catches
  * silent-drop regressions like the one that lost `--hdr` historically.
  */
+import { fpsToFfmpegArg, type Fps } from "@hyperframes/core";
+
 export interface DockerRunArgsInput {
   imageTag: string;
   /** Absolute host path to the project directory (mounted read-only at /project). */
@@ -19,7 +21,13 @@ export interface DockerRunArgsInput {
 }
 
 export interface DockerRenderOptions {
-  fps: 24 | 30 | 60;
+  /**
+   * Frame rate as an exact rational; see `Fps` in @hyperframes/core. The
+   * docker-run arg builder serializes this back to a `--fps` string
+   * (`"30"` or `"30000/1001"`) which the in-container CLI re-parses with
+   * `parseFps`, so the rational survives the host → container hop.
+   */
+  fps: Fps;
   quality: "draft" | "standard" | "high";
   format: "mp4" | "webm" | "mov" | "png-sequence";
   workers?: number;
@@ -31,6 +39,9 @@ export interface DockerRenderOptions {
   quiet: boolean;
   variables?: Record<string, unknown>;
   entryFile?: string;
+  /** Output resolution preset (e.g. "landscape-4k"). Forwarded as `--resolution`. */
+  outputResolution?: string;
+  pageSideCompositing?: boolean;
 }
 
 export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
@@ -52,7 +63,7 @@ export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
     "--output",
     `/output/${outputFilename}`,
     "--fps",
-    String(options.fps),
+    fpsToFfmpegArg(options.fps),
     "--quality",
     options.quality,
     "--format",
@@ -69,5 +80,7 @@ export function buildDockerRunArgs(input: DockerRunArgsInput): string[] {
       ? ["--variables", JSON.stringify(options.variables)]
       : []),
     ...(options.entryFile ? ["--composition", options.entryFile] : []),
+    ...(options.outputResolution ? ["--resolution", options.outputResolution] : []),
+    ...(options.pageSideCompositing === false ? ["--no-page-side-compositing"] : []),
   ];
 }

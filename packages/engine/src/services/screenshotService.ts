@@ -129,12 +129,19 @@ export async function beginFrameCapture(
 export async function pageScreenshotCapture(page: Page, options: CaptureOptions): Promise<Buffer> {
   const client = await getCdpSession(page);
   const isPng = options.format === "png";
+  const dpr = options.deviceScaleFactor ?? 1;
+  const clip = { x: 0, y: 0, width: options.width, height: options.height, scale: dpr };
   const result = await client.send("Page.captureScreenshot", {
     format: isPng ? "png" : "jpeg",
     quality: isPng ? undefined : (options.quality ?? 80),
     fromSurface: true,
-    captureBeyondViewport: false,
+    // The explicit clip rect constrains output to exact composition
+    // dimensions. The viewport-boundary pre-clip from captureBeyondViewport:
+    // false is redundant, and Chrome's compositor rounds it inward under
+    // multi-tab load — clipping the bottom/right edge of tall viewports.
+    captureBeyondViewport: true,
     optimizeForSpeed: !isPng,
+    clip,
   });
   return Buffer.from(result.data, "base64");
 }
@@ -165,7 +172,7 @@ export async function captureScreenshotWithAlpha(
     const result = await client.send("Page.captureScreenshot", {
       format: "png",
       fromSurface: true,
-      captureBeyondViewport: false,
+      captureBeyondViewport: true, // see pageScreenshotCapture for rationale
       optimizeForSpeed: false, // `true` uses a zero-alpha-aware fast path that crushes real alpha values — observed empirically, CDP docs don't spell it out
       clip: { x: 0, y: 0, width, height, scale: 1 },
     });
@@ -200,7 +207,7 @@ export async function captureScreenshotWithAlpha(
  * video itself is the backdrop, so DOM layers must only contribute their
  * foreground UI pixels — never a page-spanning solid backdrop.
  */
-export const TRANSPARENT_BG_STYLE_ID = "__hf_transparent_bg__";
+const TRANSPARENT_BG_STYLE_ID = "__hf_transparent_bg__";
 
 export async function initTransparentBackground(page: Page): Promise<void> {
   const client = await getCdpSession(page);
@@ -230,7 +237,7 @@ export async function captureAlphaPng(page: Page, width: number, height: number)
   const result = await client.send("Page.captureScreenshot", {
     format: "png",
     fromSurface: true,
-    captureBeyondViewport: false,
+    captureBeyondViewport: true, // see pageScreenshotCapture for rationale
     optimizeForSpeed: false, // must be false to preserve alpha
     clip: { x: 0, y: 0, width, height, scale: 1 },
   });
@@ -366,20 +373,92 @@ export async function removeDomLayerMask(page: Page, extraHideIds: string[]): Pr
   );
 }
 
+/**
+ * Returns the subset of `updates.videoId`s that were actually painted in
+ * this call. Videos skipped because of a hidden visual ancestor are NOT
+ * included — the caller relies on this to avoid recording a `lastInjected`
+ * cache entry for a frame that never reached the page, which would otherwise
+ * short-circuit the next inject at the same frameIndex and leave the host's
+ * first visible frame blank.
+ */
 export async function injectVideoFramesBatch(
   page: Page,
   updates: Array<{ videoId: string; dataUri: string }>,
-): Promise<void> {
-  if (updates.length === 0) return;
-  await page.evaluate(
+): Promise<string[]> {
+  if (updates.length === 0) return [];
+  return await page.evaluate(
     async (items: Array<{ videoId: string; dataUri: string }>, visualProperties: string[]) => {
+      const injectedIds: string[] = [];
       const pendingDecodes: Array<Promise<void>> = [];
+      const replacementLayoutProperties = new Set([
+        "width",
+        "height",
+        "top",
+        "left",
+        "right",
+        "bottom",
+        "inset",
+      ]);
+      // Walk ancestors looking for a host that the page has hidden. The
+      // runtime hides `[data-composition-src]` and `[data-start]` hosts that
+      // fall outside their time window; a nested `<video data-start>` inside
+      // such a host still appears "active" in the raw time-window check (its
+      // own `data-start`/`data-end` cover the whole clip), so without this
+      // guard we would paint a full-bleed replacement frame over a sibling
+      // host that *is* visible.
+      //
+      // `display: none` is always a skip signal — a `display: none` ancestor
+      // takes its whole subtree out of layout, and a child `<img>` cannot
+      // escape that. `visibility: hidden`, by contrast, is escapable: a
+      // descendant with `visibility: visible` overrides an ancestor's
+      // `visibility: hidden` per the CSS spec, and the replacement `<img>`
+      // intentionally sets `visibility: visible`. We therefore only treat
+      // `visibility: hidden` as a skip signal on sub-composition hosts
+      // (`[data-composition-src]` / `[data-composition-file]`), which is the
+      // scenario this guard exists for. Plain `[data-start]` containers may
+      // be hidden with `visibility: hidden` while still wanting their inner
+      // video's final-state frame to paint through (e.g. a GSAP timeline
+      // shorter than the host's authored data-duration, where the runtime
+      // truncates visibility but the replacement <img> must hold its last
+      // frame) — those must NOT be skipped here.
+      const isVisualAncestorHidden = (el: HTMLElement): boolean => {
+        let parent = el.parentElement;
+        while (parent !== null && parent !== document.documentElement) {
+          const computed = window.getComputedStyle(parent);
+          if (computed.display === "none") return true;
+          if (
+            computed.visibility === "hidden" &&
+            (parent.hasAttribute("data-composition-src") ||
+              parent.hasAttribute("data-composition-file"))
+          ) {
+            return true;
+          }
+          parent = parent.parentElement;
+        }
+        return false;
+      };
       for (const item of items) {
         const video = document.getElementById(item.videoId) as HTMLVideoElement | null;
         if (!video) continue;
 
         let img = video.nextElementSibling as HTMLImageElement | null;
-        const isNewImage = !img || !img.classList.contains("__render_frame__");
+        const hasImg = img !== null && img.classList.contains("__render_frame__");
+
+        if (isVisualAncestorHidden(video)) {
+          // Don't paint a frame over a hidden host — if an existing replacement
+          // <img> is still around from when the host was visible, hide it so it
+          // doesn't bleed through a sibling host that *is* visible on this seek.
+          //
+          // Use `!important` so the inline hide survives `applyDomLayerMask`'s
+          // stylesheet `#${showId} *{visibility:visible !important}` when the
+          // sub-comp host happens to land in the active layer's `show` set —
+          // important stylesheet beats non-important inline, but important
+          // inline beats important stylesheet.
+          if (hasImg && img) img.style.setProperty("visibility", "hidden", "important");
+          continue;
+        }
+
+        const isNewImage = !hasImg;
         const computedStyle = window.getComputedStyle(video);
         // Read the GSAP-controlled opacity directly from the native <video>.
         // We hide the <video> below with `visibility: hidden` only (never
@@ -387,7 +466,6 @@ export async function injectVideoFramesBatch(
         // and accurately reflects the user's intent on every frame.
         const opacityParsed = parseFloat(computedStyle.opacity);
         const computedOpacity = Number.isNaN(opacityParsed) ? 1 : opacityParsed;
-        const sourceIsStatic = !computedStyle.position || computedStyle.position === "static";
 
         if (isNewImage) {
           img = document.createElement("img");
@@ -398,10 +476,35 @@ export async function injectVideoFramesBatch(
         }
         if (!img) continue;
 
+        for (const property of visualProperties) {
+          // Opacity is handled explicitly via `computedOpacity` below — copying
+          // via the generic loop would race against the opacity:0 hide applied
+          // to the <video> at the end of this function. GSAP may animate
+          // opacity either on a wrapper (the <img> inherits via the stacking
+          // context) or directly on the <video> (we must copy it to the <img>
+          // since they are siblings). Reading computedStyle.opacity before
+          // hiding the <video> handles both cases correctly.
+          if (property === "opacity") continue;
+          // Layout is set from the video's used box below. Copying authored
+          // opposing constraints such as `inset: 0` / `right: 0` onto the
+          // replacement <img> can overconstrain replaced-image sizing and make
+          // some Chrome capture paths resample the frame anisotropically.
+          if (replacementLayoutProperties.has(property)) {
+            continue;
+          }
+          const value = computedStyle.getPropertyValue(property);
+          if (value) {
+            img.style.setProperty(property, value);
+          }
+        }
+
         // Always use absolute positioning so the <img> overlays the <video>
         // instead of flowing below it. With position:relative, both elements
         // stack vertically — the <img> lands below the video and gets clipped
         // by any overflow:hidden ancestor (e.g., border-radius wrappers).
+        //
+        // Apply this after visual style copying so the measured used box is
+        // the final authority for replacement frame geometry.
         {
           const videoRect = video.getBoundingClientRect();
           const offsetLeft = Number.isFinite(video.offsetLeft) ? video.offsetLeft : 0;
@@ -421,30 +524,6 @@ export async function injectVideoFramesBatch(
         img.style.objectPosition = computedStyle.objectPosition;
         img.style.zIndex = computedStyle.zIndex;
 
-        for (const property of visualProperties) {
-          // Opacity is handled explicitly via `computedOpacity` below — copying
-          // via the generic loop would race against the opacity:0 hide applied
-          // to the <video> at the end of this function. GSAP may animate
-          // opacity either on a wrapper (the <img> inherits via the stacking
-          // context) or directly on the <video> (we must copy it to the <img>
-          // since they are siblings). Reading computedStyle.opacity before
-          // hiding the <video> handles both cases correctly.
-          if (property === "opacity") continue;
-          if (
-            sourceIsStatic &&
-            (property === "top" ||
-              property === "left" ||
-              property === "right" ||
-              property === "bottom" ||
-              property === "inset")
-          ) {
-            continue;
-          }
-          const value = computedStyle.getPropertyValue(property);
-          if (value) {
-            img.style.setProperty(property, value);
-          }
-        }
         img.decoding = "sync";
         if (img.getAttribute("src") !== item.dataUri) {
           img.src = item.dataUri;
@@ -462,10 +541,12 @@ export async function injectVideoFramesBatch(
         // GSAP-controlled value.
         video.style.setProperty("visibility", "hidden", "important");
         video.style.setProperty("pointer-events", "none", "important");
+        injectedIds.push(item.videoId);
       }
       if (pendingDecodes.length > 0) {
         await Promise.all(pendingDecodes);
       }
+      return injectedIds;
     },
     updates,
     [...MEDIA_VISUAL_STYLE_PROPERTIES],
@@ -477,12 +558,33 @@ export async function syncVideoFrameVisibility(
   activeVideoIds: string[],
 ): Promise<void> {
   await page.evaluate((ids: string[]) => {
+    // Mirror the ancestor-visibility guard from `injectVideoFramesBatch`.
+    // See that copy for the full rationale on why `visibility: hidden` is
+    // narrowed to sub-composition hosts only — keep these two functions in
+    // sync so the inactive-arm decision matches the inject-time decision.
+    const isVisualAncestorHidden = (el: HTMLElement): boolean => {
+      let parent = el.parentElement;
+      while (parent !== null && parent !== document.documentElement) {
+        const computed = window.getComputedStyle(parent);
+        if (computed.display === "none") return true;
+        if (
+          computed.visibility === "hidden" &&
+          (parent.hasAttribute("data-composition-src") ||
+            parent.hasAttribute("data-composition-file"))
+        ) {
+          return true;
+        }
+        parent = parent.parentElement;
+      }
+      return false;
+    };
     const active = new Set(ids);
     const videos = Array.from(document.querySelectorAll("video[data-start]")) as HTMLVideoElement[];
     for (const video of videos) {
       const img = video.nextElementSibling as HTMLElement | null;
       const hasImg = img && img.classList.contains("__render_frame__");
-      if (active.has(video.id)) {
+      const ancestorHidden = isVisualAncestorHidden(video);
+      if (active.has(video.id) && !ancestorHidden) {
         // Active video: show injected <img>, hide native <video>.
         // Do NOT clobber inline opacity here — GSAP-controlled opacity must
         // survive until injectVideoFramesBatch reads it via getComputedStyle.
@@ -494,13 +596,18 @@ export async function syncVideoFrameVisibility(
           img.style.visibility = "visible";
         }
       } else {
-        // Inactive video: hide both. Use visibility only (never opacity) so we
-        // never clobber GSAP-controlled inline opacity.
+        // Inactive (or ancestor-hidden) video: hide both. Use visibility only
+        // (never opacity) so we never clobber GSAP-controlled inline opacity.
+        // Use `!important` on the <img> hide so `applyDomLayerMask`'s
+        // important stylesheet rule (`#${showId} *{visibility:visible !important}`)
+        // cannot revive a stale frame when the sub-comp host lands in the
+        // active layer's `show` set — same mask-defense reasoning as the
+        // `isVisualAncestorHidden` branch in `injectVideoFramesBatch`.
         video.style.removeProperty("display");
         video.style.setProperty("visibility", "hidden", "important");
         video.style.setProperty("pointer-events", "none", "important");
         if (hasImg) {
-          img.style.visibility = "hidden";
+          img.style.setProperty("visibility", "hidden", "important");
         }
       }
     }

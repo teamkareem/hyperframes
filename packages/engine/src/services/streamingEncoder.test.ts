@@ -23,7 +23,7 @@ import {
 import { DEFAULT_HDR10_MASTERING } from "../utils/hdr.js";
 
 const baseHdrPq: StreamingEncoderOptions = {
-  fps: 30,
+  fps: { num: 30, den: 1 },
   width: 1920,
   height: 1080,
   codec: "h265",
@@ -41,7 +41,7 @@ const baseHdrHlg: StreamingEncoderOptions = {
 };
 
 const baseSdr: StreamingEncoderOptions = {
-  fps: 30,
+  fps: { num: 30, den: 1 },
   width: 1920,
   height: 1080,
   codec: "h264",
@@ -166,9 +166,52 @@ describe("buildStreamingArgs", () => {
     });
   });
 
+  describe("fps rational forwarding", () => {
+    // Regression for the fps fraction-syntax feature: both `-framerate`
+    // (input timestamping) and `-r` (output framerate) must carry the
+    // rational verbatim — collapsing to 29.97 decimal at this boundary
+    // would defeat the whole point of supporting NTSC end-to-end.
+    it("emits rational -framerate and -r for NTSC 30000/1001 (image2pipe)", () => {
+      const sdrNtsc: StreamingEncoderOptions = {
+        ...baseSdr,
+        fps: { num: 30000, den: 1001 },
+      };
+      const args = buildStreamingArgs(sdrNtsc, "/tmp/ntsc.mp4");
+      const framerateIdx = args.indexOf("-framerate");
+      expect(framerateIdx).toBeGreaterThan(-1);
+      expect(args[framerateIdx + 1]).toBe("30000/1001");
+
+      const rIdx = args.indexOf("-r");
+      expect(rIdx).toBeGreaterThan(-1);
+      expect(args[rIdx + 1]).toBe("30000/1001");
+    });
+
+    it("emits rational -framerate and -r for NTSC 30000/1001 (rawvideo HDR)", () => {
+      const hdrNtsc: StreamingEncoderOptions = {
+        ...baseHdrPq,
+        fps: { num: 30000, den: 1001 },
+      };
+      const args = buildStreamingArgs(hdrNtsc, "/tmp/ntsc-hdr.mp4");
+      const framerateIdx = args.indexOf("-framerate");
+      expect(framerateIdx).toBeGreaterThan(-1);
+      expect(args[framerateIdx + 1]).toBe("30000/1001");
+
+      const rIdx = args.indexOf("-r");
+      expect(rIdx).toBeGreaterThan(-1);
+      expect(args[rIdx + 1]).toBe("30000/1001");
+    });
+
+    it("emits bare integer -r for { num: 30, den: 1 }", () => {
+      const args = buildStreamingArgs(baseSdr, "/tmp/30.mp4");
+      const rIdx = args.indexOf("-r");
+      expect(rIdx).toBeGreaterThan(-1);
+      expect(args[rIdx + 1]).toBe("30");
+    });
+  });
+
   describe("GPU preset mapping", () => {
     const baseGpu: StreamingEncoderOptions = {
-      fps: 30,
+      fps: { num: 30, den: 1 },
       width: 1920,
       height: 1080,
       codec: "h264",
@@ -221,6 +264,26 @@ describe("buildStreamingArgs", () => {
     it("passes QSV-supported preset names through unchanged", () => {
       const args = buildStreamingArgs({ ...baseGpu, preset: "medium" }, "/tmp/out.mp4", "qsv");
       expect(presetArg(args)).toBe("medium");
+    });
+
+    it("uses AMD AMF encoder names and quality flags when selected", () => {
+      const h264Args = buildStreamingArgs(
+        { ...baseGpu, preset: "medium", quality: 23 },
+        "/tmp/out.mp4",
+        "amf",
+      );
+      expect(h264Args[h264Args.indexOf("-c:v") + 1]).toBe("h264_amf");
+      expect(h264Args[h264Args.indexOf("-qp_i") + 1]).toBe("23");
+      expect(h264Args).toContain("-bf");
+      expect(h264Args[h264Args.indexOf("-bf") + 1]).toBe("0");
+
+      const h265Args = buildStreamingArgs(
+        { ...baseGpu, codec: "h265", preset: "medium", quality: 23 },
+        "/tmp/out.mp4",
+        "amf",
+      );
+      expect(h265Args[h265Args.indexOf("-c:v") + 1]).toBe("hevc_amf");
+      expect(h265Args[h265Args.indexOf("-qp_i") + 1]).toBe("23");
     });
   });
 });
@@ -348,7 +411,7 @@ function createSpawnSpy(): {
 }
 
 const baseOptions: StreamingEncoderOptions = {
-  fps: 30,
+  fps: { num: 30, den: 1 },
   width: 100,
   height: 100,
   codec: "h264",
@@ -528,5 +591,72 @@ describe("spawnStreamingEncoder lifecycle and cleanup", () => {
 
     controller.abort();
     expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it("inactivity timeout fires only after a no-frame gap exceeds ffmpegStreamingTimeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const { spawn, calls } = createSpawnSpy();
+      vi.resetModules();
+      vi.doMock("child_process", () => ({ spawn }));
+
+      const { spawnStreamingEncoder } = await import("./streamingEncoder.js");
+      const dir = mkdtempSync(join(tmpdir(), "se-heartbeat-"));
+      const encoder = await spawnStreamingEncoder(join(dir, "out.mp4"), baseOptions, undefined, {
+        ffmpegStreamingTimeout: 1000,
+      });
+
+      const proc = calls[0]!.proc;
+
+      // Frames every 900ms — under the 1000ms inactivity threshold — should
+      // keep resetting the timer. After 9× 900ms = 8.1s of "slow but
+      // progressing" capture the encoder must still be alive. The old total-
+      // render timeout would have fired SIGTERM at ~1000ms.
+      for (let i = 0; i < 9; i++) {
+        encoder.writeFrame(Buffer.from([i]));
+        vi.advanceTimersByTime(900);
+      }
+      expect(proc.kill).not.toHaveBeenCalled();
+
+      // Now stall — no writeFrame for longer than the threshold. SIGTERM fires.
+      vi.advanceTimersByTime(1100);
+      expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("inactivity timeout still fires when stdin is backpressured (stalled ffmpeg, live producer)", async () => {
+    vi.useFakeTimers();
+    try {
+      // Simulate the FFmpeg-hangs-but-Chrome-keeps-producing case: stdin.write
+      // always returns false (Node has to buffer because ffmpeg isn't draining
+      // the pipe). The heartbeat must NOT reset on those buffered writes —
+      // otherwise a hung ffmpeg with a steady frame producer would never
+      // SIGTERM and we'd grow Node's stdin buffer until OOM.
+      const { spawn, calls } = createSpawnSpy();
+      vi.resetModules();
+      vi.doMock("child_process", () => ({ spawn }));
+
+      const { spawnStreamingEncoder } = await import("./streamingEncoder.js");
+      const dir = mkdtempSync(join(tmpdir(), "se-backpressure-"));
+      const encoder = await spawnStreamingEncoder(join(dir, "out.mp4"), baseOptions, undefined, {
+        ffmpegStreamingTimeout: 1000,
+      });
+
+      const proc = calls[0]!.proc;
+      proc.stdin.write = (_chunk: Buffer) => false;
+
+      // Pump 9 frames at 900ms intervals — all returning false. The reset
+      // should NOT fire (every write was buffered, not accepted), so the
+      // 1000ms timer (last reset on spawn) elapses near the start.
+      for (let i = 0; i < 9; i++) {
+        encoder.writeFrame(Buffer.from([i]));
+        vi.advanceTimersByTime(900);
+      }
+      expect(proc.kill).toHaveBeenCalledWith("SIGTERM");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

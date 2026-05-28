@@ -15,7 +15,12 @@ export {
 export { compileHtml, type MediaDurationProber } from "./htmlCompiler";
 
 // HTML bundler (Node.js — requires fs, linkedom, esbuild)
-export { bundleToSingleHtml, type BundleOptions } from "./htmlBundler";
+export {
+  bundleToSingleHtml,
+  type BundleOptions,
+  prepareFlattenedInnerRoot,
+  FLATTENED_INNER_ROOT_STRIP_ATTRS,
+} from "./htmlBundler";
 
 export {
   RUNTIME_BOOTSTRAP_ATTR,
@@ -34,3 +39,10 @@ export {
 
 // Composition isolation helpers
 export { scopeCssToComposition, wrapScopedCompositionScript } from "./compositionScoping";
+
+// Sub-composition inlining (shared between bundler and producer)
+export {
+  inlineSubCompositions,
+  type InlineSubCompositionsOptions,
+  type InlineSubCompositionsResult,
+} from "./inlineSubCompositions";

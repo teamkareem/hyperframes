@@ -53,7 +53,12 @@ ENV CONTAINER=true
 # Install chrome-headless-shell for deterministic BeginFrame rendering.
 # This lightweight Chrome binary supports HeadlessExperimental.beginFrame.
 # Install to ~/.cache/puppeteer/ where resolveHeadlessShellPath() looks.
-RUN npx --yes @puppeteer/browsers install chrome-headless-shell@stable \
+#
+# Pinned to a specific build (NOT @stable) so the regression-test golden
+# baselines in packages/producer/tests/*/output/output.mp4 stay reproducible.
+# Each Chrome stable bump shifts pixel output enough to fail PSNR. Bump this
+# version together with regenerating baselines via `docker:test:update`.
+RUN npx --yes @puppeteer/browsers install chrome-headless-shell@148.0.7778.167 \
       --path /root/.cache/puppeteer \
     && find /root/.cache/puppeteer/chrome-headless-shell -name "chrome-headless-shell" -type f \
     && echo "chrome-headless-shell installed"
@@ -73,6 +78,7 @@ COPY packages/producer/package.json packages/producer/package.json
 COPY packages/cli/package.json packages/cli/package.json
 COPY packages/studio/package.json packages/studio/package.json
 COPY packages/shader-transitions/package.json packages/shader-transitions/package.json
+COPY packages/aws-lambda/package.json packages/aws-lambda/package.json
 RUN bun install --frozen-lockfile
 
 # Copy source

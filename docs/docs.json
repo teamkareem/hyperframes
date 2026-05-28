@@ -54,7 +54,8 @@
             "pages": [
               "introduction",
               "quickstart",
-              "examples"
+              "examples",
+              "launch-videos"
             ]
           },
           {
@@ -62,6 +63,7 @@
             "pages": [
               "concepts/compositions",
               "concepts/data-attributes",
+              "concepts/variables",
               "concepts/frame-adapters",
               "concepts/determinism"
             ]
@@ -69,22 +71,34 @@
           {
             "group": "Guides",
             "pages": [
+              "guides/pipeline",
               "guides/html-in-canvas",
               "guides/website-to-video",
+              "guides/antigravity",
+              "guides/copilot-cli",
               "guides/claude-design",
               "guides/open-design",
               "guides/prompting",
               "guides/hyperframes-vs-remotion",
               "guides/gsap-animation",
               "guides/rendering",
-              "guides/deploy",
               "guides/remove-background",
               "guides/hdr",
+              "guides/4k-rendering",
               "guides/performance",
               "guides/timeline-editing",
               "guides/video-editor-cheatsheet",
               "guides/common-mistakes",
               "guides/troubleshooting"
+            ]
+          },
+          {
+            "group": "Deploy",
+            "pages": [
+              "guides/deploy",
+              "deploy/aws-lambda",
+              "deploy/templates-on-lambda",
+              "deploy/migrating-to-hyperframes-lambda"
             ]
           }
         ]
@@ -93,11 +107,36 @@
         "tab": "Catalog",
         "groups": [
           {
+            "group": "Captions",
+            "pages": [
+              "catalog/components/caption-clip-wipe",
+              "catalog/components/caption-editorial-emphasis",
+              "catalog/components/caption-emoji-pop",
+              "catalog/components/caption-glitch-rgb",
+              "catalog/components/caption-gradient-fill",
+              "catalog/components/caption-highlight",
+              "catalog/components/caption-kinetic-slam",
+              "catalog/components/caption-matrix-decode",
+              "catalog/components/caption-neon-accent",
+              "catalog/components/caption-neon-glow",
+              "catalog/components/caption-parallax-layers",
+              "catalog/components/caption-particle-burst",
+              "catalog/components/caption-pill-karaoke",
+              "catalog/components/caption-texture",
+              "catalog/components/caption-weight-shift"
+            ]
+          },
+          {
             "group": "HTML-in-Canvas",
             "pages": [
+              "catalog/blocks/ios26-liquid-glass",
+              "catalog/blocks/liquid-glass-context-menu",
+              "catalog/blocks/liquid-glass-media-controls",
+              "catalog/blocks/liquid-glass-notification",
+              "catalog/blocks/liquid-glass-widgets",
+              "catalog/blocks/macos-tahoe-liquid-glass",
               "catalog/blocks/vfx-iphone-device",
               "catalog/blocks/vfx-liquid-background",
-              "catalog/blocks/vfx-liquid-glass",
               "catalog/blocks/vfx-magnetic",
               "catalog/blocks/vfx-portal",
               "catalog/blocks/vfx-shatter",
@@ -168,15 +207,26 @@
           {
             "group": "Data",
             "pages": [
-              "catalog/blocks/data-chart"
+              "catalog/blocks/data-chart",
+              "catalog/blocks/spain-map",
+              "catalog/blocks/us-map",
+              "catalog/blocks/us-map-bubble",
+              "catalog/blocks/us-map-flow",
+              "catalog/blocks/us-map-hex",
+              "catalog/blocks/world-map"
             ]
           },
           {
             "group": "Effects",
             "pages": [
+              "catalog/components/caption-blend-difference",
               "catalog/components/grain-overlay",
               "catalog/components/grid-pixelate-wipe",
-              "catalog/components/shimmer-sweep"
+              "catalog/components/parallax-unzoom",
+              "catalog/components/parallax-zoom",
+              "catalog/components/shimmer-sweep",
+              "catalog/components/texture-mask-text",
+              "catalog/components/vignette"
             ]
           },
           {
@@ -217,8 +267,10 @@
             "group": "Contributing",
             "pages": [
               "contributing",
+              "contributing/catalog",
               "contributing/release-channels",
-              "contributing/testing-local-changes"
+              "contributing/testing-local-changes",
+              "contributing/studio-manual-dom-editing"
             ]
           },
           {

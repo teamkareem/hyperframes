@@ -79,7 +79,7 @@ describe("getEncoderPreset", () => {
 });
 
 describe("buildEncoderArgs anti-banding", () => {
-  const baseOptions = { fps: 30, width: 1920, height: 1080 };
+  const baseOptions = { fps: { num: 30, den: 1 }, width: 1920, height: 1080 };
 
   it("adds aq-mode=3 x264-params for h264 CPU encoding", () => {
     const args = buildEncoderArgs(
@@ -148,8 +148,35 @@ describe("buildEncoderArgs anti-banding", () => {
   });
 });
 
+describe("buildEncoderArgs fps rational forwarding", () => {
+  // Regression for the fps fraction-syntax feature: rational fps must reach
+  // ffmpeg's `-r` flag verbatim (e.g. "30000/1001") so NTSC stays exact end-
+  // to-end rather than being rounded to 29.97 decimal at the encoder boundary.
+  it("emits integer -r for { num: 30, den: 1 }", () => {
+    const args = buildEncoderArgs(
+      { fps: { num: 30, den: 1 }, width: 1920, height: 1080, codec: "h264" },
+      ["-framerate", "30", "-i", "frames/%04d.png"],
+      "out.mp4",
+    );
+    const rIdx = args.indexOf("-r");
+    expect(rIdx).toBeGreaterThan(-1);
+    expect(args[rIdx + 1]).toBe("30");
+  });
+
+  it("emits rational -r for NTSC { num: 30000, den: 1001 }", () => {
+    const args = buildEncoderArgs(
+      { fps: { num: 30000, den: 1001 }, width: 1920, height: 1080, codec: "h264" },
+      ["-framerate", "30000/1001", "-i", "frames/%04d.png"],
+      "out.mp4",
+    );
+    const rIdx = args.indexOf("-r");
+    expect(rIdx).toBeGreaterThan(-1);
+    expect(args[rIdx + 1]).toBe("30000/1001");
+  });
+});
+
 describe("buildEncoderArgs GPU preset mapping", () => {
-  const baseOptions = { fps: 30, width: 1920, height: 1080 };
+  const baseOptions = { fps: { num: 30, den: 1 }, width: 1920, height: 1080 };
   const inputArgs = ["-framerate", "30", "-i", "frames/%04d.png"];
 
   function presetArg(args: string[]): string | undefined {
@@ -229,10 +256,32 @@ describe("buildEncoderArgs GPU preset mapping", () => {
     );
     expect(presetArg(args)).toBe("medium");
   });
+
+  it("uses AMD AMF encoder names and quality flags when selected", () => {
+    const h264Args = buildEncoderArgs(
+      { ...baseOptions, codec: "h264", preset: "medium", quality: 23, useGpu: true },
+      inputArgs,
+      "out.mp4",
+      "amf",
+    );
+    expect(h264Args[h264Args.indexOf("-c:v") + 1]).toBe("h264_amf");
+    expect(h264Args[h264Args.indexOf("-qp_i") + 1]).toBe("23");
+    expect(h264Args).toContain("-bf");
+    expect(h264Args[h264Args.indexOf("-bf") + 1]).toBe("0");
+
+    const h265Args = buildEncoderArgs(
+      { ...baseOptions, codec: "h265", preset: "medium", quality: 23, useGpu: true },
+      inputArgs,
+      "out.mp4",
+      "amf",
+    );
+    expect(h265Args[h265Args.indexOf("-c:v") + 1]).toBe("hevc_amf");
+    expect(h265Args[h265Args.indexOf("-qp_i") + 1]).toBe("23");
+  });
 });
 
 describe("buildEncoderArgs color space", () => {
-  const baseOptions = { fps: 30, width: 1920, height: 1080 };
+  const baseOptions = { fps: { num: 30, den: 1 }, width: 1920, height: 1080 };
   const inputArgs = ["-framerate", "30", "-i", "frames/%04d.png"];
 
   it("adds bt709 color space metadata for h264 CPU encoding", () => {
@@ -364,8 +413,313 @@ describe("getEncoderPreset HDR", () => {
   });
 });
 
+describe("buildEncoderArgs lockGopForChunkConcat", () => {
+  const baseOptions = { fps: { num: 30, den: 1 }, width: 1920, height: 1080 };
+  const inputArgs = ["-framerate", "30", "-i", "frames/%04d.png"];
+
+  // Default path must emit zero closed-GOP args — in-process renders rely on
+  // libx264/libx265 defaults to stay byte-identical with their PSNR baselines.
+  it("default (false) omits closed-GOP args for libx264", () => {
+    const args = buildEncoderArgs(
+      { ...baseOptions, codec: "h264", preset: "medium", quality: 23 },
+      inputArgs,
+      "out.mp4",
+    );
+    expect(args).not.toContain("-g");
+    expect(args).not.toContain("-keyint_min");
+    expect(args).not.toContain("-force_key_frames");
+    expect(args).not.toContain("-sc_threshold");
+    const paramIdx = args.indexOf("-x264-params");
+    expect(args[paramIdx + 1]).not.toContain("scenecut=0");
+    expect(args[paramIdx + 1]).not.toContain("open-gop=0");
+    expect(args[paramIdx + 1]).not.toContain("repeat-headers=1");
+  });
+
+  it("default (false) omits closed-GOP args for libx265", () => {
+    const args = buildEncoderArgs(
+      { ...baseOptions, codec: "h265", preset: "medium", quality: 23 },
+      inputArgs,
+      "out.mp4",
+    );
+    expect(args).not.toContain("-g");
+    expect(args).not.toContain("-keyint_min");
+    expect(args).not.toContain("-force_key_frames");
+    expect(args).not.toContain("-sc_threshold");
+    const paramIdx = args.indexOf("-x265-params");
+    expect(args[paramIdx + 1]).not.toContain("scenecut=0");
+    expect(args[paramIdx + 1]).not.toContain("keyint=");
+    expect(args[paramIdx + 1]).not.toContain("open-gop=0");
+    expect(args[paramIdx + 1]).not.toContain("repeat-headers=1");
+  });
+
+  it("true appends closed-GOP ffmpeg flags and x264-params for libx264", () => {
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "h264",
+        preset: "medium",
+        quality: 23,
+        lockGopForChunkConcat: true,
+        gopSize: 240,
+      },
+      inputArgs,
+      "out.mp4",
+    );
+    expect(args[args.indexOf("-g") + 1]).toBe("240");
+    expect(args[args.indexOf("-keyint_min") + 1]).toBe("240");
+    expect(args[args.indexOf("-sc_threshold") + 1]).toBe("0");
+    expect(args[args.indexOf("-force_key_frames") + 1]).toBe("expr:eq(mod(n,240),0)");
+    const paramIdx = args.indexOf("-x264-params");
+    expect(args[paramIdx + 1]).toContain("scenecut=0");
+    expect(args[paramIdx + 1]).toContain("open-gop=0");
+    expect(args[paramIdx + 1]).toContain("repeat-headers=1");
+    // -bf 0 was already present for h264; closed-GOP doesn't change that.
+    expect(args).toContain("-bf");
+    expect(args[args.indexOf("-bf") + 1]).toBe("0");
+    // 90000 timescale is required for clean concat-copy — already enforced for h264/h265.
+    expect(args[args.indexOf("-video_track_timescale") + 1]).toBe("90000");
+  });
+
+  it("true appends closed-GOP x265-params keyint controls for libx265", () => {
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "h265",
+        preset: "medium",
+        quality: 23,
+        lockGopForChunkConcat: true,
+        gopSize: 360,
+      },
+      inputArgs,
+      "out.mp4",
+    );
+    expect(args[args.indexOf("-g") + 1]).toBe("360");
+    expect(args[args.indexOf("-keyint_min") + 1]).toBe("360");
+    expect(args[args.indexOf("-sc_threshold") + 1]).toBe("0");
+    expect(args[args.indexOf("-force_key_frames") + 1]).toBe("expr:eq(mod(n,360),0)");
+    const paramIdx = args.indexOf("-x265-params");
+    expect(args[paramIdx + 1]).toContain("keyint=360");
+    expect(args[paramIdx + 1]).toContain("min-keyint=360");
+    expect(args[paramIdx + 1]).toContain("scenecut=0");
+    expect(args[paramIdx + 1]).toContain("open-gop=0");
+    expect(args[paramIdx + 1]).toContain("repeat-headers=1");
+    // h265 normally tolerates B-frames; closed-GOP concat-copy doesn't.
+    expect(args[args.indexOf("-bf") + 1]).toBe("0");
+  });
+
+  it("true preserves the x264-params anti-banding controls", () => {
+    // The closed-GOP params join onto the existing aq-mode/deblock string —
+    // make sure we didn't accidentally drop the anti-banding tuning.
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "h264",
+        preset: "medium",
+        quality: 23,
+        lockGopForChunkConcat: true,
+        gopSize: 240,
+      },
+      inputArgs,
+      "out.mp4",
+    );
+    const paramIdx = args.indexOf("-x264-params");
+    expect(args[paramIdx + 1]).toContain("aq-mode=3");
+    expect(args[paramIdx + 1]).toContain("aq-strength=0.8");
+    expect(args[paramIdx + 1]).toContain("deblock=1,1");
+    expect(args[paramIdx + 1]).toContain("colorprim=bt709");
+  });
+
+  it("true with ultrafast preset still emits closed-GOP params and skips deblock", () => {
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "h264",
+        preset: "ultrafast",
+        quality: 28,
+        lockGopForChunkConcat: true,
+        gopSize: 240,
+      },
+      inputArgs,
+      "out.mp4",
+    );
+    expect(args[args.indexOf("-g") + 1]).toBe("240");
+    const paramIdx = args.indexOf("-x264-params");
+    expect(args[paramIdx + 1]).toContain("aq-mode=3");
+    expect(args[paramIdx + 1]).toContain("scenecut=0");
+    expect(args[paramIdx + 1]).not.toContain("deblock");
+  });
+
+  it("true is a no-op on GPU encoders", () => {
+    // GPU encoders take a separate code path; lockGopForChunkConcat does not
+    // wire `-g` / `-keyint_min` into nvenc/amf/qsv/vaapi.
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "h264",
+        preset: "medium",
+        quality: 23,
+        useGpu: true,
+        lockGopForChunkConcat: true,
+        gopSize: 240,
+      },
+      inputArgs,
+      "out.mp4",
+      "nvenc",
+    );
+    expect(args).not.toContain("-g");
+    expect(args).not.toContain("-keyint_min");
+    expect(args).not.toContain("-force_key_frames");
+    expect(args).not.toContain("-sc_threshold");
+    expect(args.indexOf("-x264-params")).toBe(-1);
+  });
+
+  it("true appends closed-GOP args for libvpx-vp9", () => {
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "vp9",
+        preset: "good",
+        quality: 23,
+        lockGopForChunkConcat: true,
+        gopSize: 240,
+      },
+      inputArgs,
+      "out.webm",
+    );
+    expect(args[args.indexOf("-g") + 1]).toBe("240");
+    expect(args[args.indexOf("-keyint_min") + 1]).toBe("240");
+    expect(args[args.indexOf("-auto-alt-ref") + 1]).toBe("0");
+    expect(args[args.indexOf("-cpu-used") + 1]).toBe("2");
+    expect(args[args.indexOf("-deadline") + 1]).toBe("good");
+    expect(args.indexOf("-x264-params")).toBe(-1);
+    expect(args.indexOf("-x265-params")).toBe(-1);
+    expect(args.indexOf("-sc_threshold")).toBe(-1);
+    expect(args.indexOf("-force_key_frames")).toBe(-1);
+  });
+
+  it("default (false) omits closed-GOP args for libvpx-vp9", () => {
+    const args = buildEncoderArgs(
+      { ...baseOptions, codec: "vp9", preset: "good", quality: 23 },
+      inputArgs,
+      "out.webm",
+    );
+    expect(args).not.toContain("-g");
+    expect(args).not.toContain("-keyint_min");
+    expect(args).not.toContain("-cpu-used");
+    // The non-locked, non-alpha VP9 path leaves `-auto-alt-ref` at the
+    // libvpx default. Alpha branches still emit `-auto-alt-ref 0` for an
+    // unrelated reason (alpha + alt-ref is unsupported), but that's a
+    // separate test below.
+    expect(args).not.toContain("-auto-alt-ref");
+  });
+
+  it("true with alpha pixel format keeps alpha metadata and emits -auto-alt-ref once", () => {
+    // Regression: alpha + closed-GOP must NOT double-push `-auto-alt-ref 0`.
+    // Both paths want it disabled; the encoder branch emits it exactly once.
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "vp9",
+        preset: "good",
+        quality: 23,
+        pixelFormat: "yuva420p",
+        lockGopForChunkConcat: true,
+        gopSize: 240,
+      },
+      inputArgs,
+      "out.webm",
+    );
+    const autoAltRefIndices = args.reduce<number[]>((acc, a, i) => {
+      if (a === "-auto-alt-ref") acc.push(i);
+      return acc;
+    }, []);
+    expect(autoAltRefIndices.length).toBe(1);
+    expect(args[autoAltRefIndices[0] + 1]).toBe("0");
+    expect(args[args.indexOf("-metadata:s:v:0") + 1]).toBe("alpha_mode=1");
+    expect(args[args.indexOf("-g") + 1]).toBe("240");
+  });
+
+  it("vp9 + lockGopForChunkConcat=true throws on missing gopSize", () => {
+    // Mirrors the libx264/libx265 branch: closed-GOP without a GOP size
+    // makes no sense — surface the caller error eagerly.
+    expect(() =>
+      buildEncoderArgs(
+        {
+          ...baseOptions,
+          codec: "vp9",
+          preset: "good",
+          quality: 23,
+          lockGopForChunkConcat: true,
+        },
+        inputArgs,
+        "out.webm",
+      ),
+    ).toThrow(/lockGopForChunkConcat=true requires a positive integer gopSize/);
+  });
+
+  it("true is a no-op on ProRes (intra-only — no GOP forcing needed)", () => {
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "prores",
+        preset: "4444",
+        quality: 23,
+        lockGopForChunkConcat: true,
+        gopSize: 240,
+      },
+      inputArgs,
+      "out.mov",
+    );
+    expect(args).not.toContain("-g");
+    expect(args).not.toContain("-keyint_min");
+    expect(args).not.toContain("-force_key_frames");
+  });
+
+  it("true with missing or invalid gopSize throws", () => {
+    for (const bad of [undefined, 0, -10, NaN, Infinity]) {
+      expect(() =>
+        buildEncoderArgs(
+          {
+            ...baseOptions,
+            codec: "h264",
+            preset: "medium",
+            quality: 23,
+            lockGopForChunkConcat: true,
+            gopSize: bad as number | undefined,
+          },
+          inputArgs,
+          "out.mp4",
+        ),
+      ).toThrow(/lockGopForChunkConcat=true requires a positive integer gopSize/);
+    }
+  });
+
+  it("HDR + closed-GOP keeps HDR mastering metadata in x265-params", () => {
+    const args = buildEncoderArgs(
+      {
+        ...baseOptions,
+        codec: "h265",
+        preset: "medium",
+        quality: 23,
+        hdr: { transfer: "pq" },
+        lockGopForChunkConcat: true,
+        gopSize: 240,
+      },
+      inputArgs,
+      "out.mp4",
+    );
+    const paramIdx = args.indexOf("-x265-params");
+    expect(args[paramIdx + 1]).toContain("colorprim=bt2020");
+    expect(args[paramIdx + 1]).toContain("transfer=smpte2084");
+    expect(args[paramIdx + 1]).toContain("master-display=");
+    expect(args[paramIdx + 1]).toContain("max-cll=");
+    expect(args[paramIdx + 1]).toContain("keyint=240");
+    expect(args[paramIdx + 1]).toContain("scenecut=0");
+  });
+});
+
 describe("buildEncoderArgs HDR color space", () => {
-  const baseOptions = { fps: 30, width: 1920, height: 1080 };
+  const baseOptions = { fps: { num: 30, den: 1 }, width: 1920, height: 1080 };
   const inputArgs = ["-framerate", "30", "-i", "frames/%04d.png"];
 
   it("emits BT.2020 + arib-std-b67 tags for HDR HLG (h265 SW)", () => {
@@ -484,7 +838,7 @@ describe("buildEncoderArgs HDR color space", () => {
   });
 
   it("tags BT.2020 + transfer for HDR GPU H.265 (no mastering metadata via -x265-params)", () => {
-    // GPU encoders (nvenc, videotoolbox, qsv, vaapi) still emit the BT.2020
+    // GPU encoders (nvenc, videotoolbox, amf, qsv, vaapi) still emit the BT.2020
     // color tags via the codec-level -colorspace/-color_primaries/-color_trc
     // flags, but cannot accept x265-params, so HDR static mastering metadata
     // (master-display, max-cll) is not embedded. Acceptable for previews,

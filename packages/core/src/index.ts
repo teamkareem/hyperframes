@@ -11,6 +11,9 @@ export type {
   TimelineElementType,
   MediaElementType,
   CanvasResolution,
+  Fps,
+  FpsInput,
+  FpsParseResult,
   MediaFile,
   CompositionAPI,
   PlayerAPI,
@@ -36,6 +39,13 @@ export type {
 
 export {
   CANVAS_DIMENSIONS,
+  VALID_CANVAS_RESOLUTIONS,
+  normalizeResolutionFlag,
+  parseFps,
+  parseFpsWithDefault,
+  toFps,
+  fpsToNumber,
+  fpsToFfmpegArg,
   TIMELINE_COLORS,
   DEFAULT_DURATIONS,
   COMPOSITION_VARIABLE_TYPES,
@@ -127,6 +137,7 @@ export {
   rewriteAssetPath,
   rewriteCssAssetUrls,
 } from "./compiler/rewriteSubCompPaths";
+export { decodeUrlPathVariants } from "./utils/urlPath";
 
 // Inline scripts
 export {
