@@ -4,6 +4,8 @@ import { readFileSync, readdirSync, existsSync, lstatSync, realpathSync } from "
 import { join, resolve } from "node:path";
 import { readNodeRequestBody } from "./vite.request-body.js";
 import { createViteAdapter, isPathWithin } from "./vite.adapter";
+import { seekThumbnailPreview } from "./vite.thumbnail";
+import { generateAgentEdit, validateAgentEditRequest } from "./src/server/agentEdit";
 
 async function loadRuntimeSourceForDev(
   server: import("vite").ViteDevServer,
@@ -99,6 +101,41 @@ function devProjectApi(): Plugin {
       });
 
       // API middleware
+      server.middlewares.use(async (req, res, next) => {
+        const match = req.url?.match(/^\/api\/projects\/([^/]+)\/agent\/edit(?:\?|$)/);
+        if (!match) return next();
+        if (req.method !== "POST") {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+          return;
+        }
+
+        try {
+          const bytes = await readNodeRequestBody(req);
+          const body = bytes.byteLength > 0 ? JSON.parse(bytes.toString("utf8")) : {};
+          const projectId = decodeURIComponent(match[1] ?? "");
+          const validation = validateAgentEditRequest({
+            ...body,
+            projectId: body.projectId ?? projectId,
+          });
+          if (!validation.ok || !validation.request) {
+            res.writeHead(400, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: validation.messages.join("; "), validation }));
+            return;
+          }
+          const response = await generateAgentEdit(validation.request);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(response));
+        } catch (err) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              error: err instanceof Error ? err.message : "Invalid agent edit request",
+            }),
+          );
+        }
+      });
+
       server.middlewares.use(async (req, res, next) => {
         if (!req.url?.startsWith("/api/")) return next();
         try {

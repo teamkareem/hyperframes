@@ -4,6 +4,8 @@ import {
   applyPatchByTarget,
   readAttributeByTarget,
   readTagSnippetByTarget,
+  applyBatchedPatches,
+
   type PatchOperation,
 } from "./sourcePatcher";
 
@@ -514,5 +516,48 @@ describe("motion attribute round-trip via sourcePatcher", () => {
     );
     expect(readBack).toBeDefined();
     expect(JSON.parse(readBack!)).toEqual(motion);
+  });
+});
+
+describe("applyBatchedPatches", () => {
+  it("applies structured operations atomically per file", () => {
+    const result = applyBatchedPatches(
+      { "index.html": '<h1 id="title" class="headline">Old</h1>' },
+      [
+        {
+          filePath: "index.html",
+          target: { id: "title" },
+          operation: { type: "inline-style", property: "letter-spacing", value: "-0.04em" },
+        },
+        {
+          filePath: "index.html",
+          target: { selector: ".headline", selectorIndex: 0 },
+          operation: { type: "text-content", property: "textContent", value: "New" },
+        },
+      ],
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.files["index.html"]).toContain('style="letter-spacing: -0.04em"');
+    expect(result.files["index.html"]).toContain(">New</h1>");
+  });
+
+  it("does not partially update files when an operation targets a missing file", () => {
+    const files = { "index.html": '<h1 id="title">Old</h1>' };
+    const result = applyBatchedPatches(files, [
+      {
+        filePath: "index.html",
+        target: { id: "title" },
+        operation: { type: "text-content", property: "textContent", value: "New" },
+      },
+      {
+        filePath: "missing.html",
+        target: { id: "title" },
+        operation: { type: "text-content", property: "textContent", value: "Nope" },
+      },
+    ]);
+
+    expect(result.ok).toBe(false);
+    expect(result.files).toEqual(files);
   });
 });

@@ -1,6 +1,25 @@
 import { useState, useCallback, useRef } from "react";
 import { useMountEffect } from "./useMountEffect";
 import { resolveSourceFile, applyPatch } from "../utils/sourcePatcher";
+import { useStudioSelectionStore } from "../player/store/selectionStore";
+
+export const TYPOGRAPHY_COMPUTED_STYLE_PROPS = [
+  "font-size",
+  "font-weight",
+  "font-family",
+  "font-style",
+  "font-variant",
+  "font-stretch",
+  "font-kerning",
+  "line-height",
+  "letter-spacing",
+  "word-spacing",
+  "text-align",
+  "text-transform",
+  "text-decoration-line",
+  "white-space",
+  "direction",
+] as const;
 
 export interface PickedElement {
   id: string | null;
@@ -49,6 +68,7 @@ export function useElementPicker(
 ): UseElementPickerReturn {
   const [isPickMode, setIsPickMode] = useState(false);
   const [pickedElement, setPickedElement] = useState<PickedElement | null>(null);
+  const setCanvasSelection = useStudioSelectionStore((state) => state.setCanvasSelection);
 
   // Secondary/override iframe ref — set when a zoomed frame is active.
   // When set, all postMessage sends and DOM reads go to this ref instead.
@@ -89,7 +109,8 @@ export function useElementPicker(
 
   const clearPick = useCallback(() => {
     setPickedElement(null);
-  }, []);
+    setCanvasSelection(null);
+  }, [setCanvasSelection]);
 
   // Listen for picker messages from the iframe
   useMountEffect(() => {
@@ -106,7 +127,7 @@ export function useElementPicker(
         const el = data.elementInfo;
         if (el) {
           const styles = readComputedStyles(activeIframe, el.selector);
-          setPickedElement({
+          const picked: PickedElement = {
             id: el.id ?? null,
             tagName: el.tagName ?? "div",
             selector: el.selector ?? "",
@@ -116,6 +137,14 @@ export function useElementPicker(
             src: el.src ?? null,
             dataAttributes: el.dataAttributes ?? {},
             computedStyles: styles,
+          };
+          setPickedElement(picked);
+          setCanvasSelection({
+            kind: "element",
+            selector: picked.selector,
+            elementId: picked.id,
+            boundingBox: picked.boundingBox,
+            computedStyles: picked.computedStyles,
           });
           setIsPickMode(false);
         }
@@ -124,7 +153,7 @@ export function useElementPicker(
         const el = data.candidates?.[data.selectedIndex ?? 0];
         if (el) {
           const styles = readComputedStyles(activeIframe, el.selector);
-          setPickedElement({
+          const picked: PickedElement = {
             id: el.id ?? null,
             tagName: el.tagName ?? "div",
             selector: el.selector ?? "",
@@ -134,6 +163,14 @@ export function useElementPicker(
             src: el.src ?? null,
             dataAttributes: el.dataAttributes ?? {},
             computedStyles: styles,
+          };
+          setPickedElement(picked);
+          setCanvasSelection({
+            kind: "element",
+            selector: picked.selector,
+            elementId: picked.id,
+            boundingBox: picked.boundingBox,
+            computedStyles: picked.computedStyles,
           });
         }
       }
@@ -332,15 +369,16 @@ function readComputedStyles(iframe: HTMLIFrameElement, selector: string): Record
       "padding-right",
       "padding-bottom",
       "padding-left",
-      "font-size",
-      "font-weight",
-      "font-family",
+      ...TYPOGRAPHY_COMPUTED_STYLE_PROPS,
       "color",
       "background-color",
       "background",
       "opacity",
       "border-radius",
       "transform",
+      "translate",
+      "scale",
+      "rotate",
       "z-index",
     ];
 

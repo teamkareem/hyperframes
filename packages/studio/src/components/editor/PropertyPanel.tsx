@@ -73,6 +73,66 @@ function formatTimingValue(seconds: number): string {
   return `${seconds.toFixed(2)}s`;
 }
 
+export interface DesignerStyleControl {
+  label: string;
+  property: string;
+  fallback: string;
+}
+
+export const TYPOGRAPHY_STYLE_CONTROLS: DesignerStyleControl[] = [
+  { label: "Size", property: "font-size", fallback: "" },
+  { label: "Weight", property: "font-weight", fallback: "" },
+  { label: "Family", property: "font-family", fallback: "" },
+  { label: "Line H", property: "line-height", fallback: "normal" },
+  { label: "Letter", property: "letter-spacing", fallback: "normal" },
+  { label: "Word", property: "word-spacing", fallback: "normal" },
+  { label: "Kerning", property: "font-kerning", fallback: "auto" },
+  { label: "Align", property: "text-align", fallback: "start" },
+  { label: "Style", property: "font-style", fallback: "normal" },
+  { label: "Case", property: "text-transform", fallback: "none" },
+];
+
+const TEXT_TAGS = new Set(["div", "span", "p", "button", "label", "a", "li", "td", "th"]);
+
+export function isTextEditableElement(input: { tagName: string; textContent: string | null }) {
+  const tagName = input.tagName.toLowerCase();
+  return (
+    (tagName.startsWith("h") && /^h[1-6]$/.test(tagName)) ||
+    TEXT_TAGS.has(tagName) ||
+    Boolean(input.textContent?.trim())
+  );
+}
+
+export function getDesignerControlGroups(input: { hasTiming: boolean; isText: boolean }) {
+  const groups = ["Position & Size"];
+  if (input.isText) groups.push("Typography");
+  groups.push("Colors", "Appearance");
+  if (input.hasTiming) groups.push("Timing");
+  return groups;
+}
+
+function PropertyRow({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="text-2xs text-neutral-600 w-16 flex-shrink-0 text-right">{label}</span>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="flex-1 bg-neutral-900 border border-neutral-800 rounded px-1.5 py-0.5 text-2xs text-neutral-200 font-mono outline-none focus:border-neutral-600 min-w-0"
+      />
+    </div>
+  );
+}
+
 function parseTimingValue(input: string): number | null {
   const cleaned = input.replace(/s$/i, "").trim();
   const parsed = Number.parseFloat(cleaned);
@@ -305,6 +365,7 @@ export const PropertyPanel = memo(function PropertyPanel({
             onSetAttribute={onSetAttribute}
             onSetHtmlAttribute={onSetHtmlAttribute}
           />
+        )}
         )}
 
         <Section title="Layout" icon={<Move size={15} />}>

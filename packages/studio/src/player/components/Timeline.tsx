@@ -20,6 +20,8 @@ import {
   shouldShowTimelineShortcutHint,
   resolveTimelineAssetDrop,
 } from "./timelineLayout";
+import { useStudioSelectionStore } from "../store/selectionStore";
+import { getTimelineClipDomKey } from "../../utils/selectionAssociation";
 
 // Re-export pure utilities so existing imports from "./Timeline" still resolve.
 export {
@@ -67,6 +69,7 @@ interface TimelineProps {
   ) => Promise<void> | void;
   onBlockedEditAttempt?: (element: TimelineElement, intent: BlockedTimelineEditIntent) => void;
   onSelectElement?: (element: TimelineElement | null) => void;
+  onProjectFilesChanged?: (files: Record<string, string>) => void;
   theme?: Partial<TimelineTheme>;
 }
 
@@ -83,6 +86,7 @@ export const Timeline = memo(function Timeline({
   onResizeElement,
   onBlockedEditAttempt,
   onSelectElement,
+  onProjectFilesChanged,
   theme: themeOverrides,
 }: TimelineProps = {}) {
   const theme = useMemo(() => ({ ...defaultTimelineTheme, ...themeOverrides }), [themeOverrides]);
@@ -117,6 +121,8 @@ export const Timeline = memo(function Timeline({
       window.removeEventListener("blur", blur);
     };
   });
+  });
+
 
   const [showPopover, setShowPopover] = useState(false);
   const [showShortcutHint, setShowShortcutHint] = useState(true);
@@ -238,6 +244,30 @@ export const Timeline = memo(function Timeline({
   const selectedElementRef = useRef<TimelineElement | null>(selectedElement);
   selectedElementRef.current = selectedElement;
 
+  // Keep externally-selected clips visible. Canvas picking updates selectedElementId
+  // from StudioApp; this effect brings the clip's in/out range into view.
+  useEffect(() => {
+    if (!selectedElementId) return;
+    const scroll = scrollRef.current;
+    if (!scroll) return;
+    const clip = scroll.querySelector<HTMLElement>(
+      `[data-timeline-element-id="${getTimelineClipDomKey(selectedElementId)}"]`,
+    );
+    if (!clip) return;
+    const clipLeft = clip.offsetLeft + GUTTER;
+    const clipRight = clipLeft + clip.offsetWidth;
+    const visibleLeft = scroll.scrollLeft;
+    const visibleRight = visibleLeft + scroll.clientWidth;
+    const margin = 36;
+    if (clipLeft < visibleLeft + margin) {
+      scroll.scrollLeft = Math.max(0, clipLeft - margin);
+    } else if (clipRight > visibleRight - margin) {
+      scroll.scrollLeft = Math.max(0, clipRight - scroll.clientWidth + margin);
+    }
+  }, [selectedElementId]);
+
+  // Calculate effective pixels per second
+  // In fit mode, use clientWidth (excludes scrollbar) with a small padding
   const fitPps =
     viewportWidth > GUTTER && effectiveDuration > 0
       ? (viewportWidth - GUTTER - 2) / effectiveDuration
@@ -307,6 +337,7 @@ export const Timeline = memo(function Timeline({
       setRangeSelection(null);
     }
   });
+
 
   const { major, minor } = useMemo(
     () => generateTicks(effectiveDuration, pps),
@@ -508,6 +539,7 @@ export const Timeline = memo(function Timeline({
             setShowPopover(false);
             setRangeSelection(null);
           }}
+          onProjectFilesChanged={onProjectFilesChanged}
         />
       )}
     </div>

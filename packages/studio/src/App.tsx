@@ -3,6 +3,22 @@ import type { LeftSidebarHandle, SidebarTab } from "./components/sidebar/LeftSid
 import { useRenderQueue } from "./components/renders/useRenderQueue";
 import { usePlayerStore } from "./player";
 import { LintModal } from "./components/LintModal";
+import type { LintFinding } from "./components/LintModal";
+import { MediaPreview } from "./components/MediaPreview";
+import { isMediaFile } from "./utils/mediaTypes";
+import {
+  buildTimelineAssetId,
+  buildTimelineAssetInsertHtml,
+  buildTimelineFileDropPlacements,
+  getTimelineAssetKind,
+  insertTimelineAssetIntoSource,
+  resolveTimelineAssetSrc,
+  type TimelineAssetKind,
+} from "./utils/timelineAssetDrop";
+import { CaptionOverlay } from "./captions/components/CaptionOverlay";
+import { CanvasSelectionOverlay } from "./components/canvas/CanvasSelectionOverlay";
+import { CaptionPropertyPanel } from "./captions/components/CaptionPropertyPanel";
+import { CaptionTimeline } from "./captions/components/CaptionTimeline";
 import { useCaptionStore } from "./captions/store";
 import { useCaptionSync } from "./captions/hooks/useCaptionSync";
 import { usePersistentEditHistory } from "./hooks/usePersistentEditHistory";
