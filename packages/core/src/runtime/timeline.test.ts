@@ -7,7 +7,7 @@ describe("collectRuntimeTimelinePayload", () => {
     delete (window as any).__timelines;
   });
 
-  const defaultParams = { canonicalFps: 30, maxTimelineDurationSeconds: 1800 };
+  const defaultParams = { canonicalFps: 30 };
 
   it("returns minimal payload for empty document", () => {
     const result = collectRuntimeTimelinePayload(defaultParams);
@@ -183,6 +183,21 @@ describe("collectRuntimeTimelinePayload", () => {
     expect(result.durationInFrames).toBe(300); // 10s * 30fps
   });
 
+  it("ceil durationInFrames to match render frame count", () => {
+    const root = document.createElement("div");
+    root.setAttribute("data-composition-id", "main");
+    root.setAttribute("data-duration", "1.01");
+    document.body.appendChild(root);
+
+    const clip = document.createElement("div");
+    clip.setAttribute("data-start", "0");
+    clip.setAttribute("data-duration", "1.01");
+    root.appendChild(clip);
+
+    const result = collectRuntimeTimelinePayload(defaultParams);
+    expect(result.durationInFrames).toBe(31); // ceil(1.01s * 30fps), same as render.
+  });
+
   it("preserves the authored root duration when clips end earlier", () => {
     const root = document.createElement("div");
     root.setAttribute("data-composition-id", "main");
@@ -199,7 +214,7 @@ describe("collectRuntimeTimelinePayload", () => {
     expect(result.durationInFrames).toBe(210); // 7s * 30fps
   });
 
-  it("clamps duration to maxTimelineDurationSeconds", () => {
+  it("respects long composition durations without capping", () => {
     const root = document.createElement("div");
     root.setAttribute("data-composition-id", "main");
     root.setAttribute("data-duration", "5000");
@@ -210,11 +225,8 @@ describe("collectRuntimeTimelinePayload", () => {
     clip.setAttribute("data-duration", "5000");
     root.appendChild(clip);
 
-    const result = collectRuntimeTimelinePayload({
-      canonicalFps: 30,
-      maxTimelineDurationSeconds: 60,
-    });
-    expect(result.durationInFrames).toBeLessThanOrEqual(60 * 30);
+    const result = collectRuntimeTimelinePayload({ canonicalFps: 30 });
+    expect(result.durationInFrames).toBe(5000 * 30);
   });
 
   it("skips script/style/meta nodes", () => {

@@ -7,6 +7,8 @@ import { gsapRules } from "./rules/gsap";
 import { captionRules } from "./rules/captions";
 import { compositionRules } from "./rules/composition";
 import { adapterRules } from "./rules/adapters";
+import { textureRules } from "./rules/textures";
+import { fontRules } from "./rules/fonts";
 
 const ALL_RULES = [
   ...coreRules,
@@ -15,18 +17,20 @@ const ALL_RULES = [
   ...captionRules,
   ...compositionRules,
   ...adapterRules,
+  ...textureRules,
+  ...fontRules,
 ];
 
-export function lintHyperframeHtml(
+export async function lintHyperframeHtml(
   html: string,
   options: HyperframeLinterOptions = {},
-): HyperframeLintResult {
+): Promise<HyperframeLintResult> {
   const ctx = buildLintContext(html, options);
   const findings: HyperframeLintFinding[] = [];
   const seen = new Set<string>();
 
   for (const rule of ALL_RULES) {
-    for (const finding of rule(ctx)) {
+    for (const finding of await Promise.resolve(rule(ctx))) {
       const dedupeKey = [
         finding.code,
         finding.severity,

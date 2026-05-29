@@ -114,12 +114,6 @@ export function resolveTimelineMove(
   };
 }
 
-export function buildTrackZIndexMap(tracks: number[]): Map<number, number> {
-  const uniqueTracks = Array.from(new Set(tracks)).sort((a, b) => a - b);
-  const maxZIndex = uniqueTracks.length;
-  return new Map(uniqueTracks.map((track, index) => [track, maxZIndex - index]));
-}
-
 export function resolveTimelineResize(
   input: TimelineResizeInput,
   edge: "start" | "end",
@@ -207,18 +201,6 @@ export function hasPatchableTimelineTarget(input: { domId?: string; selector?: s
   return Boolean(input.domId || input.selector);
 }
 
-export function canOffsetTrimClipStart(input: {
-  tag: string;
-  playbackStart?: number;
-  playbackStartAttr?: "media-start" | "playback-start";
-  sourceDuration?: number;
-}): boolean {
-  if (input.playbackStartAttr != null) return true;
-  if (input.playbackStart != null) return true;
-  const normalizedTag = input.tag.toLowerCase();
-  return ["video", "audio"].includes(normalizedTag);
-}
-
 export function getTimelineEditCapabilities(input: {
   tag: string;
   duration: number;
@@ -228,14 +210,24 @@ export function getTimelineEditCapabilities(input: {
   playbackStart?: number;
   playbackStartAttr?: "media-start" | "playback-start";
   sourceDuration?: number;
+  timingSource?: "authored" | "implicit";
+  timelineLocked?: boolean;
 }): TimelineEditCapabilities {
+  if (input.timingSource === "implicit" || input.timelineLocked) {
+    return {
+      canMove: false,
+      canTrimStart: false,
+      canTrimEnd: false,
+    };
+  }
+
   const canPatch = hasPatchableTimelineTarget(input);
   const hasFiniteDuration = Number.isFinite(input.duration) && input.duration > 0;
   const hasDeterministicWindow = isDeterministicTimelineWindow(input);
   return {
-    canMove: canPatch && hasDeterministicWindow,
-    canTrimEnd: canPatch && hasFiniteDuration && hasDeterministicWindow,
-    canTrimStart: canPatch && hasFiniteDuration && canOffsetTrimClipStart(input),
+    canMove: canPatch && (hasDeterministicWindow || hasFiniteDuration),
+    canTrimEnd: canPatch && hasFiniteDuration,
+    canTrimStart: canPatch && hasFiniteDuration,
   };
 }
 
@@ -273,7 +265,6 @@ export function buildClipRangeSelection(
     anchorY: anchor.anchorY,
   };
 }
-
 export function buildTimelineAgentPrompt({
   rangeStart,
   rangeEnd,
@@ -347,7 +338,6 @@ export function buildTimelineElementAgentPrompt(element: {
 
   return lines.join("\n");
 }
-
 export function formatTimelineAttributeNumber(value: number): string {
   return Number(roundToCentiseconds(value).toFixed(2)).toString();
 }

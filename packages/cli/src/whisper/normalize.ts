@@ -332,7 +332,7 @@ export function patchCaptionHtml(dir: string, words: Word[]): void {
   try {
     htmlFiles = readdirSync(dir, { withFileTypes: true, recursive: true })
       .filter((e) => e.isFile() && e.name.endsWith(".html"))
-      .map((e) => join(e.parentPath ?? e.path, e.name));
+      .map((e) => join(e.parentPath, e.name));
   } catch {
     return;
   }

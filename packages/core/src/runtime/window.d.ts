@@ -31,10 +31,20 @@ declare global {
     __clipManifest?: RuntimeTimelineMessage;
     __playerReady?: boolean;
     __renderReady?: boolean;
+    __hfRuntimeTeardown?: (() => void) | null;
     __HF_PARITY_MODE?: boolean;
     __HF_FPS?: number;
     __HF_MAX_DURATION_SEC?: number;
     __hfThreeTime?: number;
+    /**
+     * Current seek position in seconds, set by the TypeGPU/WebGPU adapter.
+     * Poll this from your WebGPU render loop instead of `performance.now()`
+     * to get the deterministic seek position.
+     *
+     * Also listen for the `"hf-seek"` CustomEvent on `window` for an
+     * imperative push signal: `window.addEventListener("hf-seek", e => render(e.detail.time))`.
+     */
+    __hfTypegpuTime?: number;
     __HF_PICKER_API?: HyperframePickerApi;
     gsap?: {
       timeline: (params?: { paused?: boolean }) => RuntimeTimelineLike;

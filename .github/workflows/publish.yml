@@ -1,5 +1,7 @@
 name: Publish to npm
 
+permissions: {}
+
 on:
   push:
     tags:
@@ -42,14 +44,18 @@ jobs:
 
       - name: Resolve version
         id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
+          if [ "$EVENT_NAME" = "push" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${INPUT_VERSION}"
             VERSION="${VERSION#v}"
           else
-            BRANCH="${{ github.event.pull_request.head.ref }}"
+            BRANCH="${PR_HEAD_REF}"
             VERSION="${BRANCH#release/v}"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -75,9 +81,11 @@ jobs:
 
       - name: Create release tag
         if: github.event_name == 'pull_request'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -92,9 +100,9 @@ jobs:
       - name: Publish packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          DIST_TAG="${{ steps.version.outputs.dist_tag }}"
           FAILED=0
 
           publish_pkg() {
@@ -122,6 +130,7 @@ jobs:
           publish_pkg "@hyperframes/producer" "@hyperframes/producer"
           publish_pkg "@hyperframes/shader-transitions" "@hyperframes/shader-transitions"
           publish_pkg "@hyperframes/studio" "@hyperframes/studio"
+          publish_pkg "@hyperframes/aws-lambda" "@hyperframes/aws-lambda"
 
           # CLI is @hyperframes/cli in the monorepo but published as unscoped "hyperframes" on npm.
           # Rewrite the name in package.json before publishing, then use npm publish directly
@@ -153,14 +162,15 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          REPO: ${{ github.repository }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          PRERELEASE="${{ steps.version.outputs.prerelease }}"
           # Skip if release already exists (idempotent re-runs)
-          if gh release view "v${VERSION}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+          if gh release view "v${VERSION}" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release v${VERSION} already exists — skipping"
           else
-            FLAGS=(--repo "${{ github.repository }}" --title "v${VERSION}" --generate-notes)
+            FLAGS=(--repo "$REPO" --title "v${VERSION}" --generate-notes)
             if [ "$PRERELEASE" = "true" ]; then
               FLAGS+=(--prerelease)
             fi

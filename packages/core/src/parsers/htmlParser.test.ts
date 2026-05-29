@@ -197,6 +197,21 @@ describe("parseHtml", () => {
     expect(result.resolution).toBe("portrait");
   });
 
+  it("keeps explicit portrait resolution even when dimensions are square", () => {
+    const html = `
+      <html data-resolution="portrait" data-composition-width="1080" data-composition-height="1080">
+      <body>
+        <div id="stage">
+          <div id="text1" data-start="0" data-end="5"><div>Hello</div></div>
+        </div>
+      </body>
+      </html>
+    `;
+    const result = parseHtml(html);
+
+    expect(result.resolution).toBe("portrait");
+  });
+
   it("defaults to portrait when no resolution info is available", () => {
     const html = `
       <html>
@@ -210,6 +225,99 @@ describe("parseHtml", () => {
     const result = parseHtml(html);
 
     expect(result.resolution).toBe("portrait");
+  });
+
+  it("detects landscape-4k resolution from data attribute", () => {
+    const html = `
+      <html data-resolution="landscape-4k">
+      <body>
+        <div id="stage">
+          <div id="text1" data-start="0" data-end="5"><div>Hello</div></div>
+        </div>
+      </body>
+      </html>
+    `;
+    const result = parseHtml(html);
+
+    expect(result.resolution).toBe("landscape-4k");
+  });
+
+  it("infers landscape-4k from composition dimensions", () => {
+    const html = `
+      <html data-composition-width="3840" data-composition-height="2160">
+      <body>
+        <div id="stage">
+          <div id="text1" data-start="0" data-end="5"><div>Hello</div></div>
+        </div>
+      </body>
+      </html>
+    `;
+    const result = parseHtml(html);
+
+    expect(result.resolution).toBe("landscape-4k");
+  });
+
+  it("infers portrait-4k from inline stage style", () => {
+    const html = `
+      <html>
+      <body>
+        <div id="stage" style="width: 2160px; height: 3840px;">
+          <div id="text1" data-start="0" data-end="5"><div>Hello</div></div>
+        </div>
+      </body>
+      </html>
+    `;
+    const result = parseHtml(html);
+
+    expect(result.resolution).toBe("portrait-4k");
+  });
+
+  it("classifies 1440p (QHD) as landscape, not landscape-4k", () => {
+    // Regression: an earlier `>= 2560` cutoff misclassified QHD compositions
+    // as 4K. The current rule uses the canonical 4K long-side (3840) so
+    // 2560×1440 stays in the landscape preset.
+    const html = `
+      <html data-composition-width="2560" data-composition-height="1440">
+      <body>
+        <div id="stage">
+          <div id="text1" data-start="0" data-end="5"><div>Hello</div></div>
+        </div>
+      </body>
+      </html>
+    `;
+    const result = parseHtml(html);
+
+    expect(result.resolution).toBe("landscape");
+  });
+
+  it("infers square resolution from equal width/height", () => {
+    const html = `
+      <html data-composition-width="1080" data-composition-height="1080">
+      <body>
+        <div id="stage">
+          <div id="text1" data-start="0" data-end="5"><div>Hello</div></div>
+        </div>
+      </body>
+      </html>
+    `;
+    const result = parseHtml(html);
+
+    expect(result.resolution).toBe("square");
+  });
+
+  it("infers square-4k from equal width/height >= 2160", () => {
+    const html = `
+      <html data-composition-width="2160" data-composition-height="2160">
+      <body>
+        <div id="stage">
+          <div id="text1" data-start="0" data-end="5"><div>Hello</div></div>
+        </div>
+      </body>
+      </html>
+    `;
+    const result = parseHtml(html);
+
+    expect(result.resolution).toBe("square-4k");
   });
 
   it("extracts x, y, scale, opacity from data attributes", () => {

@@ -198,6 +198,26 @@ describe("HyperframesPlayer parent-frame media", () => {
     expect(mockAudio.pause).toHaveBeenCalled();
   });
 
+  it("seek() while playing pauses parent proxy (prevents mirrorTime stutter loop)", () => {
+    // Regression: previously `seek()` only called `seekAll()`, leaving the
+    // proxy playing. With the timeline frozen at the new seek target, the
+    // parent's `mirrorTime` drift-correction would yank `currentTime` back
+    // every ~80ms of accumulated drift, producing an audible audio stutter
+    // loop while the video frame stayed frozen. `seek()` must be symmetric
+    // with `pause()` for the parent-owned audio path.
+    player.setAttribute("audio-src", "https://cdn.example.com/narration.mp3");
+    document.body.appendChild(player);
+
+    player._promoteToParentProxy?.();
+    player.play();
+    expect(mockAudio.play).toHaveBeenCalled();
+    mockAudio.pause.mockClear();
+
+    player.seek(12.5);
+    expect(mockAudio.pause).toHaveBeenCalled();
+    expect(mockAudio.currentTime).toBe(12.5);
+  });
+
   it("promotion is idempotent", () => {
     player.setAttribute("audio-src", "https://cdn.example.com/narration.mp3");
     document.body.appendChild(player);
@@ -548,8 +568,15 @@ describe("HyperframesPlayer media MutationObserver scoping", () => {
     expect(observedTargets).not.toContain(fakeDoc.body);
     // Subtree is still required — sub-composition media can be deeply nested
     // inside the host (e.g. wrapper div around the `<audio>`).
+    // Attribute observation on "preload" is required so the player creates
+    // parent proxies just-in-time when the preloader promotes a clip.
     for (const call of observeSpy.mock.calls) {
-      expect(call[1]).toEqual({ childList: true, subtree: true });
+      expect(call[1]).toEqual({
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["preload"],
+      });
     }
   });
 
@@ -790,12 +817,22 @@ describe("HyperframesPlayer seek() sync path", () => {
     play?: () => void;
     pause?: () => void;
   };
+  type TimelineStub = {
+    duration: () => number;
+    time: () => number;
+    seek: (t: number) => void;
+    play: () => void;
+    pause: () => void;
+  };
   type FakeContentWindow = {
     __player?: SyncPlayerStub;
+    __timelines?: Record<string, TimelineStub>;
     postMessage?: ReturnType<typeof vi.fn>;
   };
   type PlayerInternal = HTMLElement & {
     seek: (t: number) => void;
+    play: () => void;
+    pause: () => void;
     iframe: HTMLIFrameElement;
     _currentTime: number;
   };
@@ -874,6 +911,88 @@ describe("HyperframesPlayer seek() sync path", () => {
     );
   });
 
+  it("seeks same-origin __timelines when no runtime bridge exists", () => {
+    const timeline: TimelineStub = {
+      duration: vi.fn(() => 5),
+      time: vi.fn(() => 0),
+      seek: vi.fn(),
+      play: vi.fn(),
+      pause: vi.fn(),
+    };
+    const post = vi.fn();
+    stubContentWindow({ __timelines: { main: timeline }, postMessage: post });
+
+    player.seek(2);
+
+    expect(timeline.seek).toHaveBeenCalledTimes(1);
+    expect(timeline.seek).toHaveBeenCalledWith(2);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("plays and pauses same-origin __timelines when no runtime bridge exists", () => {
+    const timeline: TimelineStub = {
+      duration: vi.fn(() => 5),
+      time: vi.fn(() => 0),
+      seek: vi.fn(),
+      play: vi.fn(),
+      pause: vi.fn(),
+    };
+    const post = vi.fn();
+    stubContentWindow({ __timelines: { main: timeline }, postMessage: post });
+
+    player.play();
+    player.pause();
+
+    expect(timeline.play).toHaveBeenCalledTimes(1);
+    expect(timeline.pause).toHaveBeenCalledTimes(1);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("pauses same-origin __timelines after seek while playing", () => {
+    const pause = vi.fn();
+    const timeline: TimelineStub = {
+      duration: vi.fn(() => 5),
+      time: vi.fn(() => 0),
+      seek: vi.fn(),
+      play: vi.fn(),
+      pause,
+    };
+    const post = vi.fn();
+    stubContentWindow({ __timelines: { main: timeline }, postMessage: post });
+
+    player.play();
+    pause.mockClear();
+    player.seek(2);
+
+    expect(timeline.seek).toHaveBeenCalledWith(2);
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("does not bypass an installed runtime bridge for direct __timelines playback", () => {
+    const timeline: TimelineStub = {
+      duration: vi.fn(() => 5),
+      time: vi.fn(() => 0),
+      seek: vi.fn(),
+      play: vi.fn(),
+      pause: vi.fn(),
+    };
+    const post = vi.fn();
+    stubContentWindow({
+      __player: { play: vi.fn(), pause: vi.fn() },
+      __timelines: { main: timeline },
+      postMessage: post,
+    });
+
+    player.play();
+    player.pause();
+
+    expect(timeline.play).not.toHaveBeenCalled();
+    expect(timeline.pause).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ action: "play" }), "*");
+    expect(post).toHaveBeenCalledWith(expect.objectContaining({ action: "pause" }), "*");
+  });
+
   it("falls back to postMessage when __player exists but lacks seek()", () => {
     // Defensive: a partial `__player` (e.g. older runtime, mocked stub) must
     // not be assumed callable. `typeof seek !== "function"` guards this.
@@ -936,6 +1055,7 @@ describe("HyperframesPlayer loop end-state handling", () => {
     seek: (timeInSeconds: number) => void;
     loop: boolean;
     _duration: number;
+    _currentTime: number;
     _paused: boolean;
     _onMessage: (event: MessageEvent) => void;
   };
@@ -1059,6 +1179,30 @@ describe("HyperframesPlayer loop end-state handling", () => {
 
     expect(seek).not.toHaveBeenCalled();
     expect(player._paused).toBe(false);
+  });
+
+  it("clamps _currentTime to _duration when a state message reports a frame past the end", () => {
+    // Regression test: the postMessage state path previously set _currentTime
+    // without clamping, while the direct timeline path already clamped. A frame
+    // count slightly past the end (common on final-frame messages) would set
+    // _currentTime > _duration, causing the progress bar to overflow the
+    // scrubber track and the time display to show e.g. "0:05 / 0:04".
+    player._duration = 4; // 4s = 120 frames at 30fps
+    player._paused = false;
+
+    player._onMessage(
+      new MessageEvent("message", {
+        source: frameWindow,
+        data: {
+          source: "hf-preview",
+          type: "state",
+          frame: 150, // 5s — past the 4s duration
+          isPlaying: false,
+        },
+      }),
+    );
+
+    expect(player._currentTime).toBe(4);
   });
 });
 

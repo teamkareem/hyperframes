@@ -167,6 +167,13 @@ describe("syncRuntimeMedia", () => {
     // Default: audio has been playing — so drift-seek forward is allowed.
     // Tests that exercise the "cold first play" guard call fakePlayedRanges(el, []).
     fakePlayedRanges(el, [[0, 1]]);
+    // Mirror bindMediaMetadataListeners: pre-set el.volume to data-volume so the
+    // first-tick path in syncRuntimeMedia sees the correct baseline (not the browser
+    // default of 1) and GSAP-change detection works correctly from the first tick.
+    const dataVolume = overrides?.volume;
+    if (dataVolume != null && Number.isFinite(dataVolume)) {
+      el.volume = Math.max(0, Math.min(1, dataVolume));
+    }
     return {
       el,
       start: 0,
@@ -341,6 +348,41 @@ describe("syncRuntimeMedia", () => {
       userVolume: 0.3,
     });
     expect(clip.el.volume).toBeCloseTo(0.3);
+  });
+
+  it("preserves authored volume changes made between sync ticks", () => {
+    const clip = createMockClip({ start: 0, end: 10, volume: 0 });
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 0, playing: false, playbackRate: 1 });
+    expect(clip.el.volume).toBe(0);
+
+    clip.el.volume = 0.5;
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 0.5, playing: false, playbackRate: 1 });
+
+    expect(clip.el.volume).toBe(0.5);
+  });
+
+  it("reports the effective element volume to external audio transports", () => {
+    const clip = createMockClip({ start: 0, end: 10, volume: 0 });
+    const onElementVolume = vi.fn();
+    syncRuntimeMedia({
+      clips: [clip],
+      timeSeconds: 0,
+      playing: false,
+      playbackRate: 1,
+      onElementVolume,
+    });
+    clip.el.volume = 0.75;
+    syncRuntimeMedia({
+      clips: [clip],
+      timeSeconds: 1,
+      playing: false,
+      playbackRate: 1,
+      userVolume: 0.5,
+      onElementVolume,
+    });
+
+    expect(clip.el.volume).toBeCloseTo(0.375);
+    expect(onElementVolume).toHaveBeenLastCalledWith(clip.el, 0.375);
   });
 
   it("hard-syncs on the first active tick (sub-composition activation, mediaStart offsets)", () => {
@@ -640,6 +682,42 @@ describe("syncRuntimeMedia", () => {
     }
 
     expect(posted).toBe(1);
+  });
+
+  it("corrects stable sub-0.5s drift after consecutive over-threshold ticks", () => {
+    const clip = createMockClip({ start: 0, end: 10, mediaStart: 0 });
+    Object.defineProperty(clip.el, "currentTime", { value: 5.4, writable: true });
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 5.4, playing: true, playbackRate: 1 });
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 5, playing: true, playbackRate: 1 });
+    expect(clip.el.currentTime).toBe(5.4);
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 5, playing: true, playbackRate: 1 });
+    expect(clip.el.currentTime).toBe(5.4);
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 5, playing: true, playbackRate: 1 });
+    expect(clip.el.currentTime).toBe(5);
+  });
+
+  it("does not force audio forward while it's still buffering (gradual drift growth)", () => {
+    const clip = createMockClip({ start: 0, end: 10, mediaStart: 0 });
+    Object.defineProperty(clip.el, "currentTime", { value: 0, writable: true });
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 0, playing: true, playbackRate: 1 });
+    for (let t = 0.016; t < 0.7; t += 0.016) {
+      syncRuntimeMedia({ clips: [clip], timeSeconds: t, playing: true, playbackRate: 1 });
+    }
+    expect(clip.el.currentTime).toBe(0);
+  });
+
+  it("forceSync corrects any drift above 20ms immediately", () => {
+    const clip = createMockClip({ start: 0, end: 10, mediaStart: 0 });
+    Object.defineProperty(clip.el, "currentTime", { value: 5.1, writable: true });
+    syncRuntimeMedia({ clips: [clip], timeSeconds: 5.1, playing: true, playbackRate: 1 });
+    syncRuntimeMedia({
+      clips: [clip],
+      timeSeconds: 5,
+      playing: true,
+      playbackRate: 1,
+      forceSync: true,
+    });
+    expect(clip.el.currentTime).toBe(5);
   });
 
   it("mutes when either outputMuted OR userMuted is true (OR invariant)", () => {

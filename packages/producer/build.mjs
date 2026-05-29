@@ -21,6 +21,12 @@ const workspaceAliasPlugin = {
     build.onResolve({ filter: /^@hyperframes\/engine$/ }, () => ({
       path: resolve(scriptDir, "../engine/src/index.ts"),
     }));
+    build.onResolve({ filter: /^@hyperframes\/engine\/alpha-blit$/ }, () => ({
+      path: resolve(scriptDir, "../engine/src/utils/alphaBlit.ts"),
+    }));
+    build.onResolve({ filter: /^@hyperframes\/engine\/shader-transitions$/ }, () => ({
+      path: resolve(scriptDir, "../engine/src/utils/shaderTransitions.ts"),
+    }));
     build.onResolve({ filter: /^@hyperframes\/core$/ }, () => ({
       path: resolve(scriptDir, "../core/src/index.ts"),
     }));
@@ -54,6 +60,55 @@ await Promise.all([
     sourcemap: true,
     entryPoints: ["src/server.ts"],
     outfile: "dist/public-server.js",
+  }),
+  // PNG decode + alpha-blit worker (hf#732 lever-4). Loaded by
+  // `pngDecodeBlitWorkerPool.createPngDecodeBlitWorkerPool` via
+  // `new Worker(<path>)`. Must be a separate entry point so the worker
+  // module is standalone and shares no parent module-graph state.
+  build({
+    bundle: true,
+    platform: "node",
+    target: "node22",
+    format: "esm",
+    external: ["puppeteer", "esbuild", "postcss"],
+    plugins: [workspaceAliasPlugin],
+    minify: false,
+    sourcemap: true,
+    entryPoints: ["src/services/pngDecodeBlitWorker.ts"],
+    outfile: "dist/services/pngDecodeBlitWorker.js",
+  }),
+  // Shader-blend worker (hf#677 follow-up). Loaded by
+  // `shaderTransitionWorkerPool.createShaderTransitionWorkerPool` via
+  // `new Worker(<path>)`. Same bundling rationale as the
+  // `pngDecodeBlitWorker` entry above.
+  build({
+    bundle: true,
+    platform: "node",
+    target: "node22",
+    format: "esm",
+    external: ["puppeteer", "esbuild", "postcss"],
+    plugins: [workspaceAliasPlugin],
+    minify: false,
+    sourcemap: true,
+    entryPoints: ["src/services/shaderTransitionWorker.ts"],
+    outfile: "dist/services/shaderTransitionWorker.js",
+  }),
+  // `@hyperframes/producer/distributed` subpath — the public distributed
+  // render primitives (plan / renderChunk / assemble). Bundled as a
+  // separate entry so adopters that don't need the in-process renderer
+  // (Lambda chunk workers, CDK constructs, thin orchestrators) can import
+  // only this surface and skip the rest of the producer's dependency tree.
+  build({
+    bundle: true,
+    platform: "node",
+    target: "node22",
+    format: "esm",
+    external: ["puppeteer", "esbuild", "postcss"],
+    plugins: [workspaceAliasPlugin],
+    minify: false,
+    sourcemap: true,
+    entryPoints: ["src/distributed.ts"],
+    outfile: "dist/distributed.js",
   }),
 ]);
 

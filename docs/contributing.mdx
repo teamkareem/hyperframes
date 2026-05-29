@@ -53,6 +53,14 @@ bun run build                        # Build all packages
 bun run --filter '*' typecheck       # Type-check all packages
 ```
 
+### Studio Editing Work
+
+If you are changing Studio's visual editing surface, read
+[Studio Manual DOM Editing](/contributing/studio-manual-dom-editing) before
+editing code. The inspector intentionally exposes only interactions it can
+persist safely back to HTML, so changes should preserve the capability gates,
+source patching model, and documented limitations.
+
 ### Running Tests
 
 <CodeGroup>
@@ -151,4 +159,4 @@ All of the following must pass before your PR can be merged:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](https://github.com/heygen-com/hyperframes/blob/main/LICENSE).
+By contributing, you agree that your contributions will be licensed under the [Apache 2.0 License](https://github.com/heygen-com/hyperframes/blob/main/LICENSE).

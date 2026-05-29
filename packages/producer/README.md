@@ -106,6 +106,36 @@ This is not chroma keying. There is no green/blue background to remove and no "k
 
 Don't paint a fullscreen background in your HTML. The default body background is overridden to transparent automatically — any `body { background: ... }`, `#root { background: ... }`, or `[data-composition-id] { background: ... }` rule is force-overridden during alpha rendering. Backgrounds on inner elements (cards, scenes, components) are kept.
 
+## Distributed rendering
+
+For renders too large for a single machine, the producer ships a public set of distributed-render primitives. They are pure functions over local file paths — networking and orchestration live in adapter packages (Temporal, AWS Lambda + Step Functions, Cloud Run Jobs, K8s Jobs).
+
+```typescript
+import { plan, renderChunk, assemble } from "@hyperframes/producer/distributed";
+
+// Controller-side: produce a self-contained planDir + content-addressed planHash.
+const planResult = await plan(
+  projectDir,
+  { fps: 30, width: 1920, height: 1080, format: "mp4" },
+  "/tmp/plan",
+);
+
+// Worker-side: render one chunk. Byte-identical retries on the same
+// `(planDir, chunkIndex)` — Temporal / Step Functions retry policies are safe
+// to point at this.
+const chunk = await renderChunk("/tmp/plan", 0, "/tmp/chunks/0.mp4");
+
+// Controller-side: stitch chunks into the final deliverable.
+await assemble(
+  "/tmp/plan",
+  ["/tmp/chunks/0.mp4", "/tmp/chunks/1.mp4"],
+  "/tmp/plan/audio.aac",
+  "/tmp/output.mp4",
+);
+```
+
+The three activity functions plus their result types are also re-exported from `@hyperframes/producer` so callers that pin the main package don't need a separate subpath import. Supported formats: `mp4` SDR, `mov` ProRes 4444, and `png-sequence`. webm and HDR mp4 trip a typed `FormatNotSupportedInDistributedError` — use the in-process renderer (`executeRenderJob`) for those.
+
 ## How it works
 
 1. **Serve** — spins up a local file server for the HTML composition

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { lintHyperframeHtml } from "../hyperframeLinter.js";
 
 describe("caption rules", () => {
-  it("warns when caption exit has no hard kill tl.set", () => {
+  it("warns when caption exit has no hard kill tl.set", async () => {
     const html = `
 <html><body>
   <div data-composition-id="captions" data-width="1920" data-height="1080">
@@ -20,13 +20,13 @@ describe("caption rules", () => {
     </script>
   </div>
 </body></html>`;
-    const result = lintHyperframeHtml(html);
+    const result = await lintHyperframeHtml(html);
     const finding = result.findings.find((f) => f.code === "caption_exit_missing_hard_kill");
     expect(finding).toBeDefined();
     expect(finding?.severity).toBe("warning");
   });
 
-  it("does not warn when caption exit has hard kill tl.set", () => {
+  it("does not warn when caption exit has hard kill tl.set", async () => {
     const html = `
 <html><body>
   <div data-composition-id="captions" data-width="1920" data-height="1080">
@@ -45,12 +45,34 @@ describe("caption rules", () => {
     </script>
   </div>
 </body></html>`;
-    const result = lintHyperframeHtml(html);
+    const result = await lintHyperframeHtml(html);
     const finding = result.findings.find((f) => f.code === "caption_exit_missing_hard_kill");
     expect(finding).toBeUndefined();
   });
 
-  it("warns when caption group has nowrap without max-width", () => {
+  it("does not warn for generic GSAP opacity exits in non-caption loops", async () => {
+    const html = `
+<html><body>
+  <div data-composition-id="main" data-width="1920" data-height="1080">
+    <script>
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+      var sceneCaption = document.querySelector("#scene-caption");
+      CARDS.forEach(function(group, gi) {
+        var groupEl = document.createElement("div");
+        groupEl.id = "card-" + gi;
+        tl.to(groupEl, { opacity: 0, duration: 0.12 }, 2);
+      });
+      window.__timelines["main"] = tl;
+    </script>
+  </div>
+</body></html>`;
+    const result = await lintHyperframeHtml(html);
+    const finding = result.findings.find((f) => f.code === "caption_exit_missing_hard_kill");
+    expect(finding).toBeUndefined();
+  });
+
+  it("warns when caption group has nowrap without max-width", async () => {
     const html = `
 <html><body>
   <div data-composition-id="captions" data-width="1920" data-height="1080">
@@ -68,13 +90,13 @@ describe("caption rules", () => {
     </script>
   </div>
 </body></html>`;
-    const result = lintHyperframeHtml(html);
+    const result = await lintHyperframeHtml(html);
     const finding = result.findings.find((f) => f.code === "caption_text_overflow_risk");
     expect(finding).toBeDefined();
     expect(finding?.severity).toBe("warning");
   });
 
-  it("does not warn when caption group has nowrap with max-width", () => {
+  it("does not warn when caption group has nowrap with max-width", async () => {
     const html = `
 <html><body>
   <div data-composition-id="captions" data-width="1920" data-height="1080">
@@ -93,14 +115,14 @@ describe("caption rules", () => {
     </script>
   </div>
 </body></html>`;
-    const result = lintHyperframeHtml(html);
+    const result = await lintHyperframeHtml(html);
     const finding = result.findings.find(
       (f) => f.code === "caption_text_overflow_risk" && f.severity === "warning",
     );
     expect(finding).toBeUndefined();
   });
 
-  it("warns when caption container uses position: relative", () => {
+  it("warns when caption container uses position: relative", async () => {
     const html = `
 <html><body>
   <div data-composition-id="captions" data-width="1920" data-height="1080">
@@ -116,7 +138,7 @@ describe("caption rules", () => {
     </script>
   </div>
 </body></html>`;
-    const result = lintHyperframeHtml(html);
+    const result = await lintHyperframeHtml(html);
     const finding = result.findings.find((f) => f.code === "caption_container_relative_position");
     expect(finding).toBeDefined();
     expect(finding?.severity).toBe("warning");

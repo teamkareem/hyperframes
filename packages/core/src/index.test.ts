@@ -8,6 +8,35 @@ describe("@hyperframes/core public API exports", () => {
       expect(core.CANVAS_DIMENSIONS).toBeDefined();
       expect(core.CANVAS_DIMENSIONS.landscape).toEqual({ width: 1920, height: 1080 });
       expect(core.CANVAS_DIMENSIONS.portrait).toEqual({ width: 1080, height: 1920 });
+      expect(core.CANVAS_DIMENSIONS["landscape-4k"]).toEqual({ width: 3840, height: 2160 });
+      expect(core.CANVAS_DIMENSIONS["portrait-4k"]).toEqual({ width: 2160, height: 3840 });
+      expect(core.CANVAS_DIMENSIONS.square).toEqual({ width: 1080, height: 1080 });
+      expect(core.CANVAS_DIMENSIONS["square-4k"]).toEqual({ width: 2160, height: 2160 });
+    });
+
+    it("exports VALID_CANVAS_RESOLUTIONS derived from CANVAS_DIMENSIONS", () => {
+      expect(core.VALID_CANVAS_RESOLUTIONS).toEqual([
+        "landscape",
+        "portrait",
+        "landscape-4k",
+        "portrait-4k",
+        "square",
+        "square-4k",
+      ]);
+    });
+
+    it("exports normalizeResolutionFlag with alias support", () => {
+      expect(core.normalizeResolutionFlag("4k")).toBe("landscape-4k");
+      expect(core.normalizeResolutionFlag("uhd")).toBe("landscape-4k");
+      expect(core.normalizeResolutionFlag("1080p")).toBe("landscape");
+      expect(core.normalizeResolutionFlag("landscape-4k")).toBe("landscape-4k");
+      expect(core.normalizeResolutionFlag("UHD")).toBe("landscape-4k");
+      expect(core.normalizeResolutionFlag("square")).toBe("square");
+      expect(core.normalizeResolutionFlag("square-4k")).toBe("square-4k");
+      expect(core.normalizeResolutionFlag("1080p-square")).toBe("square");
+      expect(core.normalizeResolutionFlag("4k-square")).toBe("square-4k");
+      expect(core.normalizeResolutionFlag("8k")).toBeUndefined();
+      expect(core.normalizeResolutionFlag(undefined)).toBeUndefined();
     });
 
     it("exports TIMELINE_COLORS", () => {
@@ -68,23 +97,14 @@ describe("@hyperframes/core public API exports", () => {
   });
 
   describe("parser exports", () => {
-    it("exports GSAP parser functions", () => {
-      expect(typeof core.parseGsapScript).toBe("function");
-      expect(typeof core.serializeGsapAnimations).toBe("function");
-      expect(typeof core.updateAnimationInScript).toBe("function");
-      expect(typeof core.addAnimationToScript).toBe("function");
-      expect(typeof core.removeAnimationFromScript).toBe("function");
-      expect(typeof core.getAnimationsForElement).toBe("function");
-      expect(typeof core.validateCompositionGsap).toBe("function");
-      expect(typeof core.keyframesToGsapAnimations).toBe("function");
-      expect(typeof core.gsapAnimationsToKeyframes).toBe("function");
+    it("does NOT re-export GSAP parser functions from barrel (available via gsap-parser subpath)", () => {
+      // GSAP parser uses recast (Node.js fs), so it's excluded from the barrel
+      // to keep browser bundles clean. Use @hyperframes/core/gsap-parser instead.
+      expect(typeof (core as Record<string, unknown>).parseGsapScript).toBe("undefined");
     });
 
-    it("exports GSAP constants", () => {
-      expect(core.SUPPORTED_PROPS).toBeDefined();
-      expect(Array.isArray(core.SUPPORTED_PROPS)).toBe(true);
-      expect(core.SUPPORTED_EASES).toBeDefined();
-      expect(Array.isArray(core.SUPPORTED_EASES)).toBe(true);
+    it("does NOT re-export GSAP constants from barrel (available via gsap-constants subpath)", () => {
+      expect((core as Record<string, unknown>).SUPPORTED_PROPS).toBeUndefined();
     });
 
     it("exports HTML parser functions", () => {

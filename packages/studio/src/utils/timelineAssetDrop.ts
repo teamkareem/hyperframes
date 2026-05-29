@@ -1,6 +1,7 @@
 import { AUDIO_EXT, IMAGE_EXT, VIDEO_EXT } from "./mediaTypes";
 
 export const TIMELINE_ASSET_MIME = "application/x-hyperframes-asset";
+export const TIMELINE_BLOCK_MIME = "application/x-hyperframes-block";
 const FALLBACK_TIMELINE_FILE_DROP_DURATION = 5;
 
 export type TimelineAssetKind = "image" | "video" | "audio";
@@ -76,6 +77,23 @@ export function buildTimelineFileDropPlacements(
   });
 }
 
+export function resolveTimelineAssetInitialGeometry(source: string): {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+} {
+  const width = Number.parseFloat(source.match(/\bdata-width=(["'])([^"']+)\1/i)?.[2] ?? "");
+  const height = Number.parseFloat(source.match(/\bdata-height=(["'])([^"']+)\1/i)?.[2] ?? "");
+
+  return {
+    left: 0,
+    top: 0,
+    width: Number.isFinite(width) && width > 0 ? Math.round(width) : 640,
+    height: Number.isFinite(height) && height > 0 ? Math.round(height) : 360,
+  };
+}
+
 export function buildTimelineAssetInsertHtml(input: {
   id: string;
   assetPath: string;
@@ -84,15 +102,18 @@ export function buildTimelineAssetInsertHtml(input: {
   duration: number;
   track: number;
   zIndex: number;
+  geometry?: { left: number; top: number; width: number; height: number };
 }): string {
   const sharedAttrs = `id="${input.id}" class="clip" src="${input.assetPath}" data-start="${input.start}" data-duration="${input.duration}" data-track-index="${input.track}"`;
+  const geometry = input.geometry ?? { left: 0, top: 0, width: 640, height: 360 };
+  const visualStyles = `position: absolute; left: ${geometry.left}px; top: ${geometry.top}px; width: ${geometry.width}px; height: ${geometry.height}px; object-fit: contain; z-index: ${input.zIndex}`;
 
   if (input.kind === "image") {
-    return `<img ${sharedAttrs} style="position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; z-index: ${input.zIndex}" />`;
+    return `<img ${sharedAttrs} style="${visualStyles}" />`;
   }
 
   if (input.kind === "video") {
-    return `<video ${sharedAttrs} muted playsinline style="position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; z-index: ${input.zIndex}"></video>`;
+    return `<video ${sharedAttrs} muted playsinline style="${visualStyles}"></video>`;
   }
 
   return `<audio ${sharedAttrs} style="z-index: ${input.zIndex}"></audio>`;
@@ -105,5 +126,12 @@ export function insertTimelineAssetIntoSource(source: string, assetHtml: string)
     throw new Error("No composition root found in target source");
   }
   const insertAt = match.index + match[0].length;
-  return `${source.slice(0, insertAt)}${assetHtml}${source.slice(insertAt)}`;
+  const lineStart = source.lastIndexOf("\n", match.index);
+  const leadingWhitespace = source.slice(lineStart + 1, match.index).match(/^(\s*)/)?.[1] ?? "";
+  const childIndent = leadingWhitespace + "  ";
+  const indented = assetHtml
+    .split("\n")
+    .map((line, i) => (i === 0 ? line : childIndent + line))
+    .join("\n");
+  return `${source.slice(0, insertAt)}\n${childIndent}${indented}${source.slice(insertAt)}`;
 }

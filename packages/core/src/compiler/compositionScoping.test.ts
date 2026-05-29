@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { parseHTML } from "linkedom";
-import { scopeCssToComposition, wrapScopedCompositionScript } from "./compositionScoping";
+import {
+  scopeCssToComposition,
+  wrapInlineScriptWithErrorBoundary,
+  wrapScopedCompositionScript,
+} from "./compositionScoping";
 
 describe("composition scoping", () => {
   it("scopes regular selectors while preserving global at-rules", () => {
@@ -75,6 +79,33 @@ body { margin: 0; }
     expect(fakeWindow.__captured).toEqual({ title: "Pro", price: "$29" });
   });
 
+  it("scoped getVariables reads from the runtime composition id when it differs", () => {
+    const { document } = parseHTML(`<div data-composition-id="scene"></div>`);
+    const fakeWindow: Record<string, unknown> = {
+      document,
+      __timelines: {},
+      __hfVariablesByComp: {
+        scene: { title: "Wrong" },
+        scene__hf1: { title: "Right" },
+      },
+      __hyperframes: {
+        getVariables: () => ({ title: "TOP-LEVEL-LEAK" }),
+        fitTextFontSize: () => undefined,
+      },
+    };
+    const wrapped = wrapScopedCompositionScript(
+      `window.__captured = __hyperframes.getVariables();`,
+      "scene",
+      "[HyperFrames] composition script error:",
+      undefined,
+      "scene__hf1",
+    );
+
+    new Function("window", wrapped)(fakeWindow);
+
+    expect(fakeWindow.__captured).toEqual({ title: "Right" });
+  });
+
   it("scoped getVariables returns {} when __hfVariablesByComp has no entry for the comp", () => {
     const { document } = parseHTML(`<div data-composition-id="missing"></div>`);
     const fakeWindow: Record<string, unknown> = {
@@ -117,6 +148,28 @@ body { margin: 0; }
     new Function("window", wrapped)(fakeWindow);
 
     expect(variablesByComp["card-1"]).toEqual({ title: "Pro" });
+  });
+
+  it("preserves static methods on classes exposed through window", () => {
+    const { document } = parseHTML(`<div data-composition-id="scene"></div>`);
+    class FakeTexts {
+      static mountChars() {
+        return "ok";
+      }
+    }
+    const fakeWindow: Record<string, unknown> = {
+      document,
+      __timelines: {},
+      Texts: FakeTexts,
+    };
+    const wrapped = wrapScopedCompositionScript(
+      `window.__capturedMountCharsType = typeof window.Texts?.mountChars;`,
+      "scene",
+    );
+
+    new Function("window", wrapped)(fakeWindow);
+
+    expect(fakeWindow.__capturedMountCharsType).toBe("function");
   });
 
   it("executes document and GSAP selectors inside the composition root", () => {
@@ -206,6 +259,124 @@ window.__selectedComp =
     new Function("window", wrapped)(fakeWindow);
 
     expect(fakeWindow.__selectedComp).toBe("scene-b");
+  });
+
+  it("scopes authored root id lookups after the flattened root drops its literal id", () => {
+    const { document } = parseHTML(`
+      <div data-composition-id="scene">
+        <div data-hf-authored-id="scene-root">
+          <h1 class="title">Scene</h1>
+        </div>
+      </div>
+    `);
+    const fakeWindow = {
+      document,
+      __selectedTitle: "",
+      __timelines: {},
+    };
+    const wrapped = wrapScopedCompositionScript(
+      `
+window.__selectedTitle =
+  document.getElementById("scene-root")
+    ?.querySelector(".title")
+    ?.textContent || "missing";
+`,
+      "scene",
+      "[HyperFrames] composition script error:",
+      undefined,
+      "scene",
+      "scene-root",
+    );
+
+    new Function("window", wrapped)(fakeWindow);
+
+    expect(fakeWindow.__selectedTitle).toBe("Scene");
+  });
+
+  it("does not rewrite authored root hash text inside CSS attribute values", () => {
+    const scoped = scopeCssToComposition(
+      'a[href="#scene-root"] { color: red; }',
+      "scene",
+      undefined,
+      "scene-root",
+    );
+
+    expect(scoped).toContain('[data-composition-id="scene"] a[href="#scene-root"]');
+    expect(scoped).not.toContain('[href="[data-hf-authored-id=');
+  });
+
+  it("does not rewrite authored root hash text inside querySelector attribute values", () => {
+    const { document } = parseHTML(`
+      <div data-composition-id="scene">
+        <a class="jump" href="#scene-root">Jump</a>
+        <div data-hf-authored-id="scene-root"></div>
+      </div>
+    `);
+    const fakeWindow = {
+      document,
+      __selectedHref: "",
+      __timelines: {},
+    };
+    const wrapped = wrapScopedCompositionScript(
+      `
+window.__selectedHref =
+  document.querySelector('a[href="#scene-root"]')
+    ?.getAttribute("href") || "missing";
+`,
+      "scene",
+      "[HyperFrames] composition script error:",
+      undefined,
+      "scene",
+      "scene-root",
+    );
+
+    new Function("window", wrapped)(fakeWindow);
+
+    expect(fakeWindow.__selectedHref).toBe("#scene-root");
+  });
+
+  it("normalizes gsap.utils.selector() selectors for authored root ids and root timing attrs", () => {
+    const { document } = parseHTML(`
+      <div data-composition-id="scene" data-start="0">
+        <div data-hf-authored-id="scene-root">
+          <h1 class="title">Scene</h1>
+        </div>
+      </div>
+      <div data-composition-id="other" data-start="0">
+        <div data-hf-authored-id="scene-root">
+          <h1 class="title">Other</h1>
+        </div>
+      </div>
+    `);
+    const fakeWindow = {
+      document,
+      __selectedRootCount: 0,
+      __selectedTimedCount: 0,
+      __selectedTitle: "",
+      __timelines: {},
+      gsap: {
+        utils: {},
+      },
+    };
+    const wrapped = wrapScopedCompositionScript(
+      `
+const select = gsap.utils.selector(document.querySelector('[data-composition-id="scene"]'));
+window.__selectedRootCount = select('#scene-root').length;
+window.__selectedTimedCount = select('[data-composition-id="scene"][data-start="0"] .title').length;
+window.__selectedTitle = select('#scene-root .title')[0]?.textContent || "missing";
+`,
+      "scene",
+      "[HyperFrames] composition script error:",
+      undefined,
+      "scene",
+      "scene-root",
+    );
+
+    new Function("window", "gsap", wrapped)(fakeWindow, fakeWindow.gsap);
+
+    expect(fakeWindow.__selectedRootCount).toBe(1);
+    expect(fakeWindow.__selectedTimedCount).toBe(1);
+    expect(fakeWindow.__selectedTitle).toBe("Scene");
   });
 
   it("reads scoped proxy accessors with the original target receiver", () => {
@@ -350,5 +521,143 @@ window.__afterTimeline = window.__timelines.scene;
     expect(fakeWindow.__beforeTimeline).toBe("initial");
     expect(fakeWindow.__afterTimeline).toBe("updated");
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("uses compound selector when authored root is the scoped element itself", () => {
+    const scoped = scopeCssToComposition(
+      "#chrome-overlay-root { --primary: #FFDC8B; }",
+      "chrome-overlay",
+      undefined,
+      "chrome-overlay-root",
+      { compoundAuthoredRoot: true },
+    );
+
+    // Both attributes are on the same element after inlining, so the selector
+    // must be compound (no space) to match.
+    expect(scoped).toContain(
+      '[data-composition-id="chrome-overlay"][data-hf-authored-id="chrome-overlay-root"]',
+    );
+    expect(scoped).not.toContain(
+      '[data-composition-id="chrome-overlay"] [data-hf-authored-id="chrome-overlay-root"]',
+    );
+  });
+
+  it("uses compound selector for authored root with descendant combinators", () => {
+    const scoped = scopeCssToComposition(
+      "#chrome-overlay-root .chrome { display: flex; }",
+      "chrome-overlay",
+      undefined,
+      "chrome-overlay-root",
+      { compoundAuthoredRoot: true },
+    );
+
+    // The authored root part is compound with scope, .chrome is a descendant
+    expect(scoped).toContain(
+      '[data-composition-id="chrome-overlay"][data-hf-authored-id="chrome-overlay-root"] .chrome',
+    );
+    expect(scoped).not.toMatch(
+      /\[data-composition-id="chrome-overlay"\]\s+\[data-hf-authored-id="chrome-overlay-root"\]\s+\.chrome/,
+    );
+  });
+
+  it("still uses descendant selector for non-root selectors with authoredRootId", () => {
+    const scoped = scopeCssToComposition(
+      ".child-element { color: red; }",
+      "chrome-overlay",
+      undefined,
+      "chrome-overlay-root",
+    );
+
+    // Regular child selectors still get a descendant combinator (space)
+    expect(scoped).toContain('[data-composition-id="chrome-overlay"] .child-element');
+  });
+
+  it("escapes </script> in scoped composition script source to prevent injection", () => {
+    const wrapped = wrapScopedCompositionScript(
+      'window.payload = "</script><script>window.pwned = true;</script>";',
+      "scene",
+    );
+
+    expect(wrapped).toContain("(function(document, gsap, window, __hyperframes)");
+    expect(wrapped).not.toContain("</script><script>");
+    expect(wrapped).toContain("<\\/script>");
+  });
+
+  it("wraps unscoped composition script source as a string literal", () => {
+    const wrapped = wrapInlineScriptWithErrorBoundary(
+      'window.payload = "</script><script>window.pwned = true;</script>";',
+      "[HyperFrames] composition script error:",
+    );
+
+    expect(wrapped).toContain("Function(");
+    expect(wrapped).toContain('\\"</script><script>window.pwned = true;</script>\\"');
+  });
+
+  it("rewrites #id CSS selectors to [data-hf-authored-id] when authoredRootId is provided", () => {
+    const scoped = scopeCssToComposition(
+      `#intro { background: #111; }
+#intro .title { font-size: 120px; color: #fff; }`,
+      "intro",
+      undefined,
+      "intro",
+    );
+
+    // #intro should become [data-hf-authored-id="intro"]
+    expect(scoped).toContain('[data-hf-authored-id="intro"]');
+    expect(scoped).toContain('[data-hf-authored-id="intro"] .title');
+    // Raw #intro selectors should be gone
+    expect(scoped).not.toMatch(/#intro\b/);
+  });
+
+  it('does not rewrite [id="intro"] attribute selectors', () => {
+    // The function only targets #intro hash selectors, not [id="intro"] attribute selectors
+    const result = scopeCssToComposition(
+      '[id="intro"] .title { color: red; }',
+      "intro",
+      undefined,
+      "intro",
+    );
+    expect(result).toContain('[id="intro"]');
+  });
+
+  it("wraps scripts with authored root id normalization for #id GSAP selectors", () => {
+    const { document } = parseHTML(`
+      <div data-composition-id="intro">
+        <div data-hf-authored-id="intro">
+          <div class="title">HELLO</div>
+        </div>
+      </div>
+    `);
+    const gsapTargets: string[][] = [];
+    const fakeWindow = {
+      document,
+      __timelines: {},
+      gsap: {
+        timeline: () => ({
+          fromTo(targets: Element[], _from: unknown, _to: unknown) {
+            gsapTargets.push(Array.from(targets).map((t) => t.textContent || ""));
+            return this;
+          },
+        }),
+      },
+    };
+    const wrapped = wrapScopedCompositionScript(
+      `
+var tl = gsap.timeline({ paused: true });
+tl.fromTo('#intro .title', { opacity: 0 }, { opacity: 1, duration: 0.5 }, 0.2);
+window.__timelines['intro'] = tl;
+`,
+      "intro",
+      "[HyperFrames] composition script error:",
+      undefined,
+      "intro",
+      "intro",
+    );
+
+    new Function("window", "gsap", wrapped)(fakeWindow, fakeWindow.gsap);
+
+    // The scoped script should resolve '#intro .title' against the
+    // data-hf-authored-id="intro" element, finding the .title child.
+    expect(gsapTargets).toEqual([["HELLO"]]);
   });
 });

@@ -1,5 +1,13 @@
 name: Windows render verification
 
+permissions:
+  contents: read
+
+# Suppress hyperframes CLI telemetry from HeyGen's own CI runs.
+# External users' CI continues to emit telemetry unless they set this themselves.
+env:
+  HYPERFRAMES_NO_TELEMETRY: "1"
+
 # Manually triggered smoke test that renders a HyperFrames composition on a
 # real Windows runner. Proves the PR #336 `where ffmpeg` fix actually works
 # end-to-end: FFmpeg is discovered natively on Windows, Chrome is installed
@@ -54,14 +62,30 @@ jobs:
               - "bun.lock"
               - ".github/workflows/windows-render.yml"
 
+  preflight:
+    name: Preflight (lint + format)
+    needs: changes
+    if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+      - uses: ./.github/actions/preflight
+
   render-windows:
     name: Render on windows-latest
-    needs: changes
+    needs: [changes, preflight]
     if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 30
 
     steps:
+      - name: Disable Windows Defender real-time monitoring
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -143,7 +167,16 @@ jobs:
 
       - name: Install dependencies
         shell: pwsh
-        run: bun install --frozen-lockfile
+        # Force the pre-1.3 "hoisted" linker on Windows. Bun 1.3.x's default
+        # "isolated" linker creates nested workspace junctions that don't
+        # materialize reliably on Windows GHA runners — manifests as
+        # `Cannot find package 'esbuild'` walking up from
+        # `packages/producer/build.mjs` and `EPERM stat` on
+        # `packages/producer/node_modules/@fontsource/*` from generators.
+        # See oven-sh/bun#23615, #18354, #10146. Linux CI keeps isolated;
+        # the lockfile is linker-agnostic so this flag is safe with
+        # --frozen-lockfile.
+        run: bun install --frozen-lockfile --linker=hoisted
 
       - name: Build all packages
         shell: pwsh
@@ -325,15 +358,24 @@ jobs:
   # invocations, CRLF, file URLs, etc.) in existing vitest suites.
   # The producer package is skipped because its tests require Docker /
   # Linux-only tooling (Dockerfile.test, LFS golden MP4 baselines).
+  # The aws-lambda package is skipped because it targets the AWS Lambda
+  # Linux runtime exclusively (`@sparticuz/chromium` is Linux-only; the
+  # ZIP layout is for `/var/task` on AL2023). Its handler.test.ts also
+  # trips a bun-on-Windows workspace-symlink quirk reading the
+  # producer's transitive `hono` dep.
   # -------------------------------------------------------------------
   test-windows:
     name: Tests on windows-latest
-    needs: changes
+    needs: [changes, preflight]
     if: needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 20
 
     steps:
+      - name: Disable Windows Defender real-time monitoring
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -360,15 +402,30 @@ jobs:
 
       - name: Install dependencies
         shell: pwsh
-        run: bun install --frozen-lockfile
+        # Force the pre-1.3 "hoisted" linker on Windows. Bun 1.3.x's default
+        # "isolated" linker creates nested workspace junctions that don't
+        # materialize reliably on Windows GHA runners — manifests as
+        # `Cannot find package 'esbuild'` walking up from
+        # `packages/producer/build.mjs` and `EPERM stat` on
+        # `packages/producer/node_modules/@fontsource/*` from generators.
+        # See oven-sh/bun#23615, #18354, #10146. Linux CI keeps isolated;
+        # the lockfile is linker-agnostic so this flag is safe with
+        # --frozen-lockfile.
+        run: bun install --frozen-lockfile --linker=hoisted
 
       - name: Build
         shell: pwsh
         run: bun run build
 
-      - name: Run tests (all packages except producer)
+      - name: Run tests (all packages except producer + aws-lambda)
         shell: pwsh
-        run: bun run --filter "!@hyperframes/producer" test
+        # Enumerate the packages we want to test instead of negating —
+        # `bun run --filter "!a" --filter "!b"` composes as a union (any
+        # package matching either negation runs), not an intersection.
+        # That meant `@hyperframes/producer` was effectively still being
+        # tested on Windows, which is what we explicitly want skipped
+        # (Docker / LFS-baseline tooling).
+        run: bun run --filter @hyperframes/core --filter @hyperframes/engine --filter @hyperframes/player --filter @hyperframes/cli --filter @hyperframes/studio --filter @hyperframes/shader-transitions test
 
       - name: Run runtime contract test
         shell: pwsh

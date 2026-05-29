@@ -1,273 +1,386 @@
 import { memo } from "react";
-import { X, MousePointer, Move, Type, Palette, Clock, Eye } from "../../icons/SystemIcons";
-import { Button, IconButton } from "../ui";
-import type { PickedElement } from "../../hooks/useElementPicker";
+import { Clock, Eye, Layers, MessageSquare, Move, X } from "../../icons/SystemIcons";
+import { type DomEditSelection } from "./domEditing";
+import { readStudioBoxSize, readStudioPathOffset, readStudioRotation } from "./manualEdits";
+import type { ImportedFontAsset } from "./fontAssets";
+import {
+  EMPTY_STYLES,
+  formatPxMetricValue,
+  LABEL,
+  parsePxMetricValue,
+  RESPONSIVE_GRID,
+} from "./propertyPanelHelpers";
+import { MetricField, Section } from "./propertyPanelPrimitives";
+import { isMediaElement, MediaSection } from "./propertyPanelMediaSection";
+import { TextSection, StyleSections } from "./propertyPanelSections";
+import { GsapAnimationSection } from "./GsapAnimationSection";
+import { STUDIO_GSAP_PANEL_ENABLED } from "./manualEditingAvailability";
+
+// Re-export helpers that external consumers import from this module
+export {
+  buildStrokeStyleUpdates,
+  buildStrokeWidthStyleUpdates,
+  getCssFilterFunctionPx,
+  getClipPathInsetPx,
+  inferBoxShadowPreset,
+  inferClipPathPreset,
+  normalizePanelPxValue,
+  setCssFilterFunctionPx,
+} from "./propertyPanelHelpers";
 
 interface PropertyPanelProps {
-  element: PickedElement | null;
-  isPickMode: boolean;
-  onEnablePick: () => void;
-  onDisablePick: () => void;
-  onClearPick: () => void;
-  onSetStyle: (prop: string, value: string) => void;
-  onSetDataAttr: (attr: string, value: string) => void;
-  onSetText?: (text: string) => void;
+  projectId: string;
+  projectDir: string | null;
+  assets: string[];
+  element: DomEditSelection | null;
+  multiSelectCount?: number;
+  copiedAgentPrompt: boolean;
+  onClearSelection: () => void;
+  onSetStyle: (prop: string, value: string) => void | Promise<void>;
+  onSetAttribute: (attr: string, value: string) => void | Promise<void>;
+  onSetHtmlAttribute: (attr: string, value: string | null) => void | Promise<void>;
+  onSetManualOffset: (element: DomEditSelection, next: { x: number; y: number }) => void;
+  onSetManualSize: (element: DomEditSelection, next: { width: number; height: number }) => void;
+  onSetManualRotation: (element: DomEditSelection, next: { angle: number }) => void;
+  onSetText: (value: string, fieldKey?: string) => void;
+  onSetTextFieldStyle: (fieldKey: string, property: string, value: string) => void;
+  onAddTextField: (afterFieldKey?: string) => string | Promise<string | null> | null;
+  onRemoveTextField: (fieldKey: string) => void;
+  onAskAgent: () => void;
+  onImportAssets?: (files: FileList) => Promise<string[]>;
+  fontAssets?: ImportedFontAsset[];
+  onImportFonts?: (files: FileList | File[]) => Promise<ImportedFontAsset[]>;
+  gsapAnimations?: import("@hyperframes/core/gsap-parser").GsapAnimation[];
+  gsapMultipleTimelines?: boolean;
+  gsapUnsupportedTimelinePattern?: boolean;
+  onUpdateGsapProperty?: (animId: string, prop: string, value: number | string) => void;
+  onUpdateGsapMeta?: (
+    animId: string,
+    updates: { duration?: number; ease?: string; position?: number },
+  ) => void;
+  onDeleteGsapAnimation?: (animId: string) => void;
+  onAddGsapProperty?: (animId: string, prop: string) => void;
+  onRemoveGsapProperty?: (animId: string, prop: string) => void;
+  onAddGsapAnimation?: (method: "to" | "from" | "set") => void;
 }
 
-function PropertyRow({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-2xs text-neutral-600 w-16 flex-shrink-0 text-right">{label}</span>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="flex-1 bg-neutral-900 border border-neutral-800 rounded px-1.5 py-0.5 text-2xs text-neutral-200 font-mono outline-none focus:border-neutral-600 min-w-0"
-      />
-    </div>
-  );
+/* ------------------------------------------------------------------ */
+/*  TimingSection                                                      */
+/* ------------------------------------------------------------------ */
+
+function formatTimingValue(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0.00s";
+  return `${seconds.toFixed(2)}s`;
 }
 
-function ColorRow({
-  label,
-  value,
-  onChange,
+function parseTimingValue(input: string): number | null {
+  const cleaned = input.replace(/s$/i, "").trim();
+  const parsed = Number.parseFloat(cleaned);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function TimingSection({
+  element,
+  onSetAttribute,
 }: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
+  element: DomEditSelection;
+  onSetAttribute: (attr: string, value: string) => void | Promise<void>;
 }) {
+  const start = Number.parseFloat(element.dataAttributes.start ?? "0") || 0;
+  const duration =
+    Number.parseFloat(
+      element.dataAttributes.duration ?? element.dataAttributes["hf-authored-duration"] ?? "0",
+    ) || 0;
+  const end = start + duration;
+
+  const commitStart = (nextValue: string) => {
+    const parsed = parseTimingValue(nextValue);
+    if (parsed == null) return;
+    void onSetAttribute("start", parsed.toFixed(2));
+  };
+
+  const commitDuration = (nextValue: string) => {
+    const parsed = parseTimingValue(nextValue);
+    if (parsed == null || parsed <= 0) return;
+    void onSetAttribute("duration", parsed.toFixed(2));
+  };
+
+  const commitEnd = (nextValue: string) => {
+    const parsed = parseTimingValue(nextValue);
+    if (parsed == null || parsed <= start) return;
+    void onSetAttribute("duration", (parsed - start).toFixed(2));
+  };
+
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-2xs text-neutral-600 w-16 flex-shrink-0 text-right">{label}</span>
-      <div className="flex items-center gap-1 flex-1">
-        <div
-          className="w-5 h-5 rounded border border-neutral-700 flex-shrink-0"
-          style={{ backgroundColor: value }}
-        />
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          className="flex-1 bg-neutral-900 border border-neutral-800 rounded px-1.5 py-0.5 text-2xs text-neutral-200 font-mono outline-none focus:border-neutral-600 min-w-0"
+    <Section title="Timing" icon={<Clock size={15} />}>
+      <div className={RESPONSIVE_GRID}>
+        <MetricField label="Start" value={formatTimingValue(start)} onCommit={commitStart} />
+        <MetricField label="End" value={formatTimingValue(end)} onCommit={commitEnd} />
+      </div>
+      <div className="mt-3">
+        <MetricField
+          label="Duration"
+          value={formatTimingValue(duration)}
+          onCommit={commitDuration}
         />
       </div>
-    </div>
+    </Section>
   );
 }
 
-function SectionHeader({ icon: Icon, label }: { icon: typeof Move; label: string }) {
-  return (
-    <div className="flex items-center gap-1.5 mt-2 mb-1">
-      <Icon size={10} className="text-neutral-600" />
-      <span className="text-2xs font-medium text-neutral-500 uppercase tracking-wider">
-        {label}
-      </span>
-    </div>
-  );
-}
+/* ------------------------------------------------------------------ */
+/*  PropertyPanel                                                      */
+/* ------------------------------------------------------------------ */
 
 export const PropertyPanel = memo(function PropertyPanel({
+  projectId,
+  projectDir,
+  assets,
   element,
-  isPickMode,
-  onEnablePick,
-  onDisablePick,
-  onClearPick,
+  multiSelectCount = 0,
+  copiedAgentPrompt,
+  onClearSelection,
   onSetStyle,
-  onSetDataAttr,
+  onSetAttribute,
+  onSetHtmlAttribute,
+  onSetManualOffset,
+  onSetManualSize,
+  onSetManualRotation,
   onSetText,
+  onSetTextFieldStyle,
+  onAddTextField,
+  onRemoveTextField,
+  onAskAgent,
+  onImportAssets,
+  fontAssets = [],
+  onImportFonts,
+  gsapAnimations = [],
+  gsapMultipleTimelines,
+  gsapUnsupportedTimelinePattern,
+  onUpdateGsapProperty,
+  onUpdateGsapMeta,
+  onDeleteGsapAnimation,
+  onAddGsapProperty,
+  onRemoveGsapProperty,
+  onAddGsapAnimation,
 }: PropertyPanelProps) {
+  const styles = element?.computedStyles ?? EMPTY_STYLES;
+
   if (!element) {
     return (
-      <div className="flex flex-col items-center justify-center h-full px-4 text-center">
-        <MousePointer size={20} className="text-neutral-700 mb-2" />
-        <p className="text-xs text-neutral-500">Click an element in the preview to inspect it</p>
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={isPickMode ? onDisablePick : onEnablePick}
-          className={`mt-3 ${isPickMode ? "bg-studio-accent/20 text-studio-accent border-studio-accent/30" : ""}`}
-        >
-          {isPickMode ? "Pick mode active..." : "Enable Pick Mode"}
-        </Button>
+      <div className="flex h-full flex-col bg-neutral-900">
+        <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+          {multiSelectCount > 1 ? (
+            <>
+              <Layers size={18} className="mb-3 text-neutral-600" />
+              <p className="text-sm font-medium text-neutral-200">
+                {multiSelectCount} elements selected
+              </p>
+              <p className="mt-2 max-w-[260px] text-xs leading-5 text-neutral-500">
+                Select a single element to edit its properties. Click an element in the preview or
+                use the timeline layer panel.
+              </p>
+            </>
+          ) : (
+            <>
+              <Eye size={18} className="mb-3 text-neutral-600" />
+              <p className="text-sm font-medium text-neutral-200">
+                Select an element in the preview.
+              </p>
+              <p className="mt-2 max-w-[260px] text-xs leading-5 text-neutral-500">
+                The inspector is tuned for element edits with safer geometry controls, color
+                picking, and cleaner grouped layer controls.
+              </p>
+            </>
+          )}
+        </div>
       </div>
     );
   }
 
-  const s = element.computedStyles;
+  const manualOffsetEditingDisabled = !element.capabilities.canApplyManualOffset;
+  const manualSizeEditingDisabled = !element.capabilities.canApplyManualSize;
+  const sourceLabel = element.id ? `#${element.id}` : element.selector;
+  const showEditableSections = element.capabilities.canEditStyles;
+  const manualOffset = readStudioPathOffset(element.element);
+  const manualSize = readStudioBoxSize(element.element);
+  const resolvedWidth =
+    manualSize.width > 0
+      ? manualSize.width
+      : (parsePxMetricValue(styles.width ?? "") ?? element.boundingBox.width);
+  const resolvedHeight =
+    manualSize.height > 0
+      ? manualSize.height
+      : (parsePxMetricValue(styles.height ?? "") ?? element.boundingBox.height);
+
+  const commitManualOffset = (axis: "x" | "y", nextValue: string) => {
+    const parsed = parsePxMetricValue(nextValue);
+    if (parsed == null) return;
+    const current = readStudioPathOffset(element.element);
+    onSetManualOffset(element, {
+      x: axis === "x" ? parsed : current.x,
+      y: axis === "y" ? parsed : current.y,
+    });
+  };
+
+  const commitManualSize = (axis: "width" | "height", nextValue: string) => {
+    const parsed = parsePxMetricValue(nextValue);
+    if (parsed == null || parsed <= 0) return;
+    const current = readStudioBoxSize(element.element);
+    const width =
+      current.width > 0
+        ? current.width
+        : (parsePxMetricValue(styles.width ?? "") ?? element.boundingBox.width);
+    const height =
+      current.height > 0
+        ? current.height
+        : (parsePxMetricValue(styles.height ?? "") ?? element.boundingBox.height);
+    onSetManualSize(element, {
+      width: axis === "width" ? parsed : width,
+      height: axis === "height" ? parsed : height,
+    });
+  };
+
+  const manualRotation = readStudioRotation(element.element);
+  const commitManualRotation = (nextValue: string) => {
+    const parsed = Number.parseFloat(nextValue);
+    if (!Number.isFinite(parsed)) return;
+    onSetManualRotation(element, { angle: parsed });
+  };
 
   return (
-    <div className="flex flex-col h-full min-h-0">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800 flex-shrink-0">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <span className="text-2xs font-mono text-studio-accent truncate">{element.selector}</span>
-        </div>
-        <div className="flex items-center gap-1">
-          <IconButton
-            icon={<MousePointer size={11} />}
-            aria-label={isPickMode ? "Disable pick mode" : "Enable pick mode"}
-            size="sm"
-            onClick={isPickMode ? onDisablePick : onEnablePick}
-            className={isPickMode ? "text-studio-accent bg-studio-accent/10" : ""}
-          />
-          <IconButton
-            icon={<X size={11} />}
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-neutral-900 text-neutral-100">
+      <div className="border-b border-neutral-800 px-4 py-5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className={LABEL}>Document</div>
+            <div className="mt-3 truncate text-[12px] font-semibold text-neutral-100">
+              {element.label}
+            </div>
+            <div className="mt-1 truncate text-[11px] text-neutral-500">{sourceLabel}</div>
+          </div>
+          <button
+            type="button"
             aria-label="Clear selection"
-            size="sm"
-            onClick={onClearPick}
-          />
+            onClick={onClearSelection}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-neutral-700 bg-neutral-950 text-neutral-500 shadow-[0_1px_2px_rgba(0,0,0,0.2)] transition-colors hover:border-neutral-600 hover:text-neutral-200"
+          >
+            <X size={13} />
+          </button>
+        </div>
+        <div className="mt-4 flex min-w-0 flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onAskAgent}
+            className="inline-flex h-8 items-center justify-center gap-2 rounded-xl border border-neutral-700 bg-neutral-950 px-3.5 text-[11px] font-medium text-neutral-100 transition-colors hover:border-studio-accent/40 hover:text-studio-accent"
+          >
+            <MessageSquare size={15} />
+            <span>{copiedAgentPrompt ? "Prompt copied" : "Ask agent"}</span>
+          </button>
         </div>
       </div>
 
-      {/* Properties */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
-        {/* Element info */}
-        <div className="flex items-center gap-2 mb-2">
-          <span className="text-2xs text-neutral-300 font-medium">{element.label}</span>
-          <span className="text-2xs text-neutral-600 font-mono">&lt;{element.tagName}&gt;</span>
-        </div>
+      <div className="flex-1 overflow-y-auto">
+        <TextSection
+          element={element}
+          styles={styles}
+          fontAssets={fontAssets}
+          onImportFonts={onImportFonts}
+          onSetText={onSetText}
+          onSetTextFieldStyle={onSetTextFieldStyle}
+          onAddTextField={onAddTextField}
+          onRemoveTextField={onRemoveTextField}
+        />
 
-        {/* Position & Size */}
-        <SectionHeader icon={Move} label="Position & Size" />
-        <div className="grid grid-cols-2 gap-1">
-          <PropertyRow
-            label="X"
-            value={s["left"] ?? "auto"}
-            onChange={(v) => onSetStyle("left", v)}
-          />
-          <PropertyRow
-            label="Y"
-            value={s["top"] ?? "auto"}
-            onChange={(v) => onSetStyle("top", v)}
-          />
-          <PropertyRow
-            label="W"
-            value={s["width"] ?? "auto"}
-            onChange={(v) => onSetStyle("width", v)}
-          />
-          <PropertyRow
-            label="H"
-            value={s["height"] ?? "auto"}
-            onChange={(v) => onSetStyle("height", v)}
-          />
-        </div>
-
-        {/* Typography */}
-        {(element.tagName === "div" ||
-          element.tagName === "span" ||
-          element.tagName === "p" ||
-          element.tagName === "h1" ||
-          element.tagName === "h2") && (
-          <>
-            <SectionHeader icon={Type} label="Typography" />
-            <PropertyRow
-              label="Size"
-              value={s["font-size"] ?? ""}
-              onChange={(v) => onSetStyle("font-size", v)}
-            />
-            <PropertyRow
-              label="Weight"
-              value={s["font-weight"] ?? ""}
-              onChange={(v) => onSetStyle("font-weight", v)}
-            />
-            <PropertyRow
-              label="Family"
-              value={s["font-family"]?.split(",")[0] ?? ""}
-              onChange={(v) => onSetStyle("font-family", v)}
-            />
-          </>
+        {element.dataAttributes.start != null && (
+          <TimingSection element={element} onSetAttribute={onSetAttribute} />
         )}
 
-        {/* Colors */}
-        <SectionHeader icon={Palette} label="Colors" />
-        <ColorRow
-          label="Color"
-          value={s["color"] ?? "#fff"}
-          onChange={(v) => onSetStyle("color", v)}
-        />
-        <ColorRow
-          label="Background"
-          value={s["background-color"] ?? "transparent"}
-          onChange={(v) => onSetStyle("background-color", v)}
-        />
-
-        {/* Appearance */}
-        <SectionHeader icon={Eye} label="Appearance" />
-        <PropertyRow
-          label="Opacity"
-          value={s["opacity"] ?? "1"}
-          onChange={(v) => onSetStyle("opacity", v)}
-        />
-        <PropertyRow
-          label="Radius"
-          value={s["border-radius"] ?? "0"}
-          onChange={(v) => onSetStyle("border-radius", v)}
-        />
-        <PropertyRow
-          label="Z-index"
-          value={s["z-index"] ?? "auto"}
-          onChange={(v) => onSetStyle("z-index", v)}
-        />
-        <PropertyRow
-          label="Transform"
-          value={s["transform"] ?? "none"}
-          onChange={(v) => onSetStyle("transform", v)}
-        />
-
-        {/* Timing */}
-        {(element.dataAttributes["start"] || element.dataAttributes["duration"]) && (
-          <>
-            <SectionHeader icon={Clock} label="Timing" />
-            {element.dataAttributes["start"] != null && (
-              <PropertyRow
-                label="Start"
-                value={element.dataAttributes["start"]}
-                onChange={(v) => onSetDataAttr("start", v)}
-              />
-            )}
-            {element.dataAttributes["duration"] != null && (
-              <PropertyRow
-                label="Duration"
-                value={element.dataAttributes["duration"]}
-                onChange={(v) => onSetDataAttr("duration", v)}
-              />
-            )}
-            {element.dataAttributes["track-index"] != null && (
-              <PropertyRow
-                label="Track"
-                value={element.dataAttributes["track-index"]}
-                onChange={(v) => onSetDataAttr("track-index", v)}
-              />
-            )}
-          </>
+        {isMediaElement(element) && (
+          <MediaSection
+            projectDir={projectDir}
+            element={element}
+            styles={styles}
+            onSetStyle={onSetStyle}
+            onSetAttribute={onSetAttribute}
+            onSetHtmlAttribute={onSetHtmlAttribute}
+          />
         )}
 
-        {/* Editable text content */}
-        {element.textContent && (
-          <>
-            <SectionHeader icon={Type} label="Text Content" />
-            <textarea
-              defaultValue={element.textContent}
-              onBlur={(e) => onSetText?.(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && e.metaKey) {
-                  (e.target as HTMLTextAreaElement).blur();
-                }
-              }}
-              rows={3}
-              className="w-full bg-neutral-900 border border-neutral-800 rounded px-2 py-1.5 text-xs text-neutral-200 outline-none focus:border-neutral-600 resize-y leading-relaxed"
-              placeholder="Edit text..."
+        <Section title="Layout" icon={<Move size={15} />}>
+          <div className={RESPONSIVE_GRID}>
+            <MetricField
+              label="X"
+              value={formatPxMetricValue(manualOffset.x)}
+              disabled={manualOffsetEditingDisabled}
+              scrub
+              onCommit={(next) => commitManualOffset("x", next)}
             />
-          </>
+            <MetricField
+              label="Y"
+              value={formatPxMetricValue(manualOffset.y)}
+              disabled={manualOffsetEditingDisabled}
+              scrub
+              onCommit={(next) => commitManualOffset("y", next)}
+            />
+            <MetricField
+              label="W"
+              value={formatPxMetricValue(resolvedWidth)}
+              disabled={manualSizeEditingDisabled}
+              scrub
+              onCommit={(next) => commitManualSize("width", next)}
+            />
+            <MetricField
+              label="H"
+              value={formatPxMetricValue(resolvedHeight)}
+              disabled={manualSizeEditingDisabled}
+              scrub
+              onCommit={(next) => commitManualSize("height", next)}
+            />
+            <MetricField
+              label="R"
+              value={`${manualRotation.angle}°`}
+              onCommit={(next) => commitManualRotation(next.replace("°", ""))}
+            />
+          </div>
+          <div className="mt-3">
+            <MetricField
+              label="Z-index"
+              value={String(parseInt(styles["z-index"] || "auto", 10) || 0)}
+              scrub
+              onCommit={(next) => onSetStyle("z-index", next)}
+            />
+          </div>
+        </Section>
+
+        {STUDIO_GSAP_PANEL_ENABLED &&
+          onUpdateGsapProperty &&
+          onUpdateGsapMeta &&
+          onDeleteGsapAnimation &&
+          onAddGsapProperty &&
+          onAddGsapAnimation && (
+            <GsapAnimationSection
+              animations={gsapAnimations}
+              multipleTimelines={gsapMultipleTimelines}
+              unsupportedTimelinePattern={gsapUnsupportedTimelinePattern}
+              onUpdateProperty={onUpdateGsapProperty}
+              onUpdateMeta={onUpdateGsapMeta}
+              onDeleteAnimation={onDeleteGsapAnimation}
+              onAddProperty={onAddGsapProperty}
+              onRemoveProperty={onRemoveGsapProperty ?? (() => {})}
+              onAddAnimation={onAddGsapAnimation}
+            />
+          )}
+
+        {showEditableSections && (
+          <StyleSections
+            projectId={projectId}
+            element={element}
+            styles={styles}
+            assets={assets}
+            onSetStyle={onSetStyle}
+            onImportAssets={onImportAssets}
+          />
         )}
       </div>
     </div>

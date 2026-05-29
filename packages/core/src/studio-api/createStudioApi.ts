@@ -7,6 +7,8 @@ import { registerLintRoutes } from "./routes/lint.js";
 import { registerRenderRoutes } from "./routes/render.js";
 import { registerThumbnailRoutes } from "./routes/thumbnail.js";
 import { registerWaveformRoutes } from "./routes/waveform.js";
+import { registerFontRoutes } from "./routes/fonts.js";
+import { registerRegistryRoutes } from "./routes/registry.js";
 
 /**
  * Create a Hono sub-app with all studio API routes.
@@ -24,6 +26,8 @@ export function createStudioApi(adapter: StudioApiAdapter): Hono {
   registerRenderRoutes(api, adapter);
   registerThumbnailRoutes(api, adapter);
   registerWaveformRoutes(api, adapter);
+  registerFontRoutes(api);
+  registerRegistryRoutes(api, adapter);
 
   return api;
 }

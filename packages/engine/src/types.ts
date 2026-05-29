@@ -4,6 +4,7 @@
  * The engine's page contract. Any web page that wants to be rendered
  * as video must expose `window.__hf` implementing the HfProtocol interface.
  */
+import type { Fps } from "@hyperframes/core";
 
 // ── Seek Protocol ──────────────────────────────────────────────────────────────
 
@@ -44,8 +45,8 @@ export interface HfTransitionMeta {
   time: number;
   /** Transition duration (seconds) */
   duration: number;
-  /** Shader identifier (e.g. "fade", "wipe") */
-  shader: string;
+  /** Shader identifier. Undefined when the transition is a CSS crossfade. */
+  shader?: string;
   /** GSAP easing string (e.g. "power2.inOut") */
   ease: string;
   /** Scene id the transition starts from */
@@ -81,7 +82,13 @@ export interface HfProtocol {
 export interface CaptureOptions {
   width: number;
   height: number;
-  fps: number;
+  /**
+   * Frame rate as an exact rational. Integer fps is `{ num: 30, den: 1 }`;
+   * NTSC is `{ num: 30000, den: 1001 }`. Captures are scheduled by the
+   * decimal interval (1000 * den / num ms) but FFmpeg arg builders emit the
+   * rational form verbatim — see `fpsToFfmpegArg`.
+   */
+  fps: Fps;
   format?: "jpeg" | "png";
   quality?: number;
   deviceScaleFactor?: number;
@@ -113,6 +120,20 @@ export interface CaptureOptions {
    * `--variables-file <path>`. Must be a JSON-serializable plain object.
    */
   variables?: Record<string, unknown>;
+  /**
+   * When `true`, the BeginFrame warmup loop driven during page navigation
+   * runs exactly `LOCKED_WARMUP_TICKS` (60) iterations regardless of how
+   * long the page load takes, making `session.beginFrameTimeTicks`
+   * deterministic across machines with different page-load latencies.
+   *
+   * Default `false`: wall-clock-bounded driver — ticks until page-readiness
+   * completes, accumulating whatever count the host CPU manages. Preserves
+   * the in-process renderer's BeginFrame timing baselines.
+   *
+   * Has no effect outside BeginFrame mode (screenshot capture never runs a
+   * warmup loop).
+   */
+  lockWarmupTicks?: boolean;
 }
 
 export interface CaptureVideoMetadataHint {

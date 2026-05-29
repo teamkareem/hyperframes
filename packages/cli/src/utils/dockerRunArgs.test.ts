@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildDockerRunArgs, type DockerRenderOptions } from "./dockerRunArgs.js";
 
 const BASE: DockerRenderOptions = {
-  fps: 30,
+  fps: { num: 30, den: 1 },
   quality: "standard",
   format: "mp4",
   gpu: false,
@@ -151,7 +151,7 @@ describe("buildDockerRunArgs", () => {
     const args = buildDockerRunArgs({
       ...FIXED_INPUT,
       options: {
-        fps: 60,
+        fps: { num: 60, den: 1 },
         quality: "high",
         format: "webm",
         workers: 8,
@@ -238,5 +238,56 @@ describe("buildDockerRunArgs", () => {
   it("omits --composition when entryFile is not set", () => {
     const args = buildDockerRunArgs({ ...FIXED_INPUT, options: BASE });
     expect(args).not.toContain("--composition");
+  });
+
+  it("forwards rational --fps verbatim (NTSC 30000/1001)", () => {
+    // Regression for the fps fraction-syntax feature: the rational form must
+    // survive the host → container hop as a single `30000/1001` argument so
+    // the in-container CLI re-parses it as exact NTSC, not 29.97 decimal.
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, fps: { num: 30000, den: 1001 } },
+    });
+    const fpsIdx = args.indexOf("--fps");
+    expect(fpsIdx).toBeGreaterThanOrEqual(0);
+    expect(args[fpsIdx + 1]).toBe("30000/1001");
+  });
+
+  it("forwards integer --fps as a bare integer string", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, fps: { num: 60, den: 1 } },
+    });
+    const fpsIdx = args.indexOf("--fps");
+    expect(fpsIdx).toBeGreaterThanOrEqual(0);
+    expect(args[fpsIdx + 1]).toBe("60");
+  });
+
+  it("forwards --resolution to the container when outputResolution is set", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, outputResolution: "landscape-4k" },
+    });
+    const idx = args.indexOf("--resolution");
+    expect(idx).toBeGreaterThan(-1);
+    expect(args[idx + 1]).toBe("landscape-4k");
+  });
+
+  it("omits --resolution when outputResolution is not set", () => {
+    const args = buildDockerRunArgs({ ...FIXED_INPUT, options: BASE });
+    expect(args).not.toContain("--resolution");
+  });
+
+  it("forwards --no-page-side-compositing when pageSideCompositing is false", () => {
+    const args = buildDockerRunArgs({
+      ...FIXED_INPUT,
+      options: { ...BASE, pageSideCompositing: false },
+    });
+    expect(args).toContain("--no-page-side-compositing");
+  });
+
+  it("omits --no-page-side-compositing when pageSideCompositing is not explicitly false", () => {
+    const args = buildDockerRunArgs({ ...FIXED_INPUT, options: BASE });
+    expect(args).not.toContain("--no-page-side-compositing");
   });
 });

@@ -7,7 +7,7 @@ export const examples: Example[] = [
   ["Output as JSON", "hyperframes info --json"],
 ];
 import { join } from "node:path";
-import { parseHtml } from "@hyperframes/core";
+import { parseHtml, CANVAS_DIMENSIONS } from "@hyperframes/core";
 import { c } from "../ui/colors.js";
 import { formatBytes, label } from "../ui/format.js";
 import { ensureDOMParser } from "../utils/dom.js";
@@ -52,16 +52,9 @@ export default defineCommand({
     const heightMatch =
       html.match(/data-composition-id[^>]*data-height=["'](\d+)["']/) ||
       html.match(/data-height=["'](\d+)["'][^>]*data-composition-id/);
-    const width = widthMatch?.[1]
-      ? parseInt(widthMatch[1], 10)
-      : parsed.resolution === "portrait"
-        ? 1080
-        : 1920;
-    const height = heightMatch?.[1]
-      ? parseInt(heightMatch[1], 10)
-      : parsed.resolution === "portrait"
-        ? 1920
-        : 1080;
+    const fallback = CANVAS_DIMENSIONS[parsed.resolution];
+    const width = widthMatch?.[1] ? parseInt(widthMatch[1], 10) : fallback.width;
+    const height = heightMatch?.[1] ? parseInt(heightMatch[1], 10) : fallback.height;
     const resolution = `${width}x${height}`;
     const size = totalSize(project.dir);
 

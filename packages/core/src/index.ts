@@ -11,6 +11,9 @@ export type {
   TimelineElementType,
   MediaElementType,
   CanvasResolution,
+  Fps,
+  FpsInput,
+  FpsParseResult,
   MediaFile,
   CompositionAPI,
   PlayerAPI,
@@ -36,6 +39,13 @@ export type {
 
 export {
   CANVAS_DIMENSIONS,
+  VALID_CANVAS_RESOLUTIONS,
+  normalizeResolutionFlag,
+  parseFps,
+  parseFpsWithDefault,
+  toFps,
+  fpsToNumber,
+  fpsToFfmpegArg,
   TIMELINE_COLORS,
   DEFAULT_DURATIONS,
   COMPOSITION_VARIABLE_TYPES,
@@ -61,22 +71,19 @@ export {
   ZOOM_CONTAINER_STYLES,
 } from "./templates/constants";
 
-// Parsers
-export type { GsapAnimation, GsapMethod, ParsedGsap } from "./parsers/gsapParser";
+// Parsers — recast-free GSAP helpers only. The AST parser (parseGsapScript and
+// the script-mutation helpers) depends on recast/@babel/parser, which break in
+// browser/SSR bundles; it is reachable only via the Node-only
+// `@hyperframes/core/gsap-parser` subpath.
+export type { GsapAnimation, GsapMethod, ParsedGsap } from "./parsers/gsapSerialize";
 
 export {
-  parseGsapScript,
   serializeGsapAnimations,
-  updateAnimationInScript,
-  addAnimationToScript,
-  removeAnimationFromScript,
-  getAnimationsForElement,
+  getAnimationsForElementId,
   validateCompositionGsap,
   keyframesToGsapAnimations,
   gsapAnimationsToKeyframes,
-  SUPPORTED_PROPS,
-  SUPPORTED_EASES,
-} from "./parsers/gsapParser";
+} from "./parsers/gsapSerialize";
 
 export type { ParsedHtml, CompositionMetadata } from "./parsers/htmlParser";
 
@@ -127,6 +134,7 @@ export {
   rewriteAssetPath,
   rewriteCssAssetUrls,
 } from "./compiler/rewriteSubCompPaths";
+export { decodeUrlPathVariants } from "./utils/urlPath";
 
 // Inline scripts
 export {
