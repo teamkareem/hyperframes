@@ -140,7 +140,7 @@ If you want the Claude Design loop without lock-in, Open Design is the same arti
 
 ## Known limitations
 
-- **Render still happens locally** — Open Design produces the HTML; `npx hyperframes render` and HDR encoding still need FFmpeg + Node 22+ on your machine.
+- **Render still happens locally** — Open Design produces the HTML; `npx hyperframes render` and HDR encoding still need FFmpeg + Node 22.23.4+ (or 24.22.1+ / 26.12.1+) on your machine.
 - **In-pane preview is sandboxed iframe** — full browser playback is reliable; for frame-accurate scrubbing use `npx hyperframes preview` after handoff.
 - **Shader passthrough requires WebGL** — same as the Claude Design path; Open Design's iframe sandbox supports it.
 - **Skill pre-flight is daemon-side** — if you bypass the skill picker and paste raw HTML into chat, you lose the side-file injection and 5-dim critique gate. Use the skill.

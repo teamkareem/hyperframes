@@ -10,7 +10,7 @@
   <a href="https://www.npmjs.com/package/hyperframes"><img src="https://img.shields.io/npm/v/hyperframes.svg?style=flat" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/hyperframes"><img src="https://img.shields.io/npm/dm/hyperframes.svg?style=flat" alt="npm downloads"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
-  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node.js"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%5E22.23.4%20%7C%7C%20%5E24.22.1%20%7C%7C%20%3E%3D26.12.1-brightgreen" alt="Node.js"></a>
   <a href="https://discord.gg/EbK98HBPdk"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
@@ -58,7 +58,7 @@ npx hyperframes preview      # preview in browser with live reload
 npx hyperframes render       # render to MP4
 ```
 
-**Requirements:** Node.js 22+, FFmpeg
+**Requirements:** Node.js 22.23.4+, 24.22.1+, or 26.12.1+ (CVE-2026-111497), FFmpeg
 
 ## What You Can Build
 

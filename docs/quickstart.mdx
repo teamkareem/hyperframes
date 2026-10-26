@@ -54,20 +54,20 @@ The agent handles scaffolding, animation, and rendering. See the [prompting guid
 
 ### Prerequisites
 
-- **Node.js 22+** — runtime for the CLI and dev server
+- **Node.js 22.23.4+, 24.22.1+, or 26.12.1+** — runtime for the CLI and dev server
 - **FFmpeg** — video encoding for local renders
 
 <Accordion title="Install instructions">
   <Steps>
-    <Step title="Install Node.js 22+">
-      Hyperframes requires Node.js 22 or later. Check your version:
+    <Step title="Install Node.js 22.23.4+">
+      Hyperframes requires Node.js 22.23.4+, 24.22.1+, or 26.12.1+ (`^22.23.4 || ^24.22.1 || >=26.12.1`). Older releases are vulnerable to CVE-2026-111497 (Brotli decoder RCE). Node 23 and 25 are not supported. Check your version:
 
       ```bash
       node --version
       ```
 
       ```bash Expected output
-      v22.0.0   # or any version >= 22
+      v22.23.4   # or 24.22.1+ / 26.12.1+
       ```
     </Step>
 

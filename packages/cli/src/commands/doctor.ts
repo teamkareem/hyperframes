@@ -109,8 +109,34 @@ function checkVersion(): CheckResult {
   return { ok: true, detail: `${VERSION} (latest)` };
 }
 
-function checkNode(): CheckResult {
-  return { ok: true, detail: `${process.version} (${process.platform} ${process.arch})` };
+// Must match `engines.node` in the published package.json files. These are the
+// first releases with the Brotli decoder fix for CVE-2026-111497.
+export const SUPPORTED_NODE_RANGE = "^22.23.4 || ^24.22.1 || >=26.12.1";
+const PATCHED_NODE_LINES: ReadonlyArray<readonly [number, number, number]> = [
+  [22, 23, 4],
+  [24, 22, 1],
+  [26, 12, 1],
+];
+
+export function isSupportedNodeVersion(version: string): boolean {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version);
+  if (!match) return false;
+  const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const atLeast = (min: readonly [number, number, number]) =>
+    minor !== min[1] ? minor > min[1] : patch >= min[2];
+  if (major > 26) return true;
+  const line = PATCHED_NODE_LINES.find(([m]) => m === major);
+  return line ? atLeast(line) : false;
+}
+
+export function checkNode(version = process.version): CheckResult {
+  const detail = `${version} (${process.platform} ${process.arch})`;
+  if (isSupportedNodeVersion(version)) return { ok: true, detail };
+  return {
+    ok: false,
+    detail,
+    hint: `Node ${SUPPORTED_NODE_RANGE} required — older releases are vulnerable to CVE-2026-111497 (Brotli decoder RCE). Upgrade: https://nodejs.org/en/download`,
+  };
 }
 
 // ── Hardware & Environment Checks ──────────────────────────────────────────

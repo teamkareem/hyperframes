@@ -8,7 +8,7 @@ Full HTML-to-video rendering pipeline: capture frames with Chrome's BeginFrame A
 npm install @hyperframes/producer
 ```
 
-**Requirements:** Node.js >= 22, Chrome/Chromium (auto-downloaded), FFmpeg
+**Requirements:** Node.js `^22.23.4 || ^24.22.1 || >=26.12.1` (CVE-2026-111497), Chrome/Chromium (auto-downloaded), FFmpeg
 
 ## Usage
 
