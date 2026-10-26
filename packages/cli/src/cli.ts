@@ -48,6 +48,13 @@ if (rootVersionRequested) {
   process.exit(0);
 }
 
+// ── Runtime floor (CVE-2026-111497) ─────────────────────────────────────────
+// `doctor` stays runnable so users can diagnose the unsupported runtime.
+import { enforceSupportedRuntime } from "./utils/nodeVersion.js";
+
+const runtimeExitCode = enforceSupportedRuntime(commandArg);
+if (runtimeExitCode !== undefined) process.exit(runtimeExitCode);
+
 // ── Load .env from CWD ─────────────────────────────────────────────────────
 // Agents run from the project directory where .env holds API keys (Gemini,
 // HeyGen, ElevenLabs). Load it automatically so they don't need `source .env`.

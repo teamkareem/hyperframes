@@ -724,7 +724,7 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
     |------|-------------|
     | `--json` | Output as JSON (includes `_meta` envelope) |
 
-    Verifies CLI version, Node.js, FFmpeg, FFprobe, Chrome, and Docker availability. If a newer CLI version is available, the version row shows an upgrade hint. The Node.js row fails outside `^22.23.4 || ^24.22.1 || >=26.12.1`, because older releases are vulnerable to CVE-2026-111497.
+    Verifies CLI version, Node.js, FFmpeg, FFprobe, Chrome, and Docker availability. If a newer CLI version is available, the version row shows an upgrade hint. The Node.js row fails outside `^22.23.4 || ^24.22.1 || >=26.12.1` (or Bun older than 1.4.4), because older releases are vulnerable to CVE-2026-111497. On such a runtime every other command exits with code 1 and the same message. `doctor` and `--version` still run so you can diagnose it.
 
     **CI gating.** `hyperframes doctor --json` always exits 0 on successful execution — the command succeeded if it produced valid output. Whether the environment is healthy is carried in the `ok` field of the payload, so a new CLI release (which flips `Version.ok` to `false`) never breaks your pipeline. Pipe through `jq` to gate on the payload instead:
 

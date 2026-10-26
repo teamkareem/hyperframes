@@ -60,7 +60,7 @@ The agent handles scaffolding, animation, and rendering. See the [prompting guid
 <Accordion title="Install instructions">
   <Steps>
     <Step title="Install Node.js 22.23.4+">
-      Hyperframes requires Node.js 22.23.4+, 24.22.1+, or 26.12.1+ (`^22.23.4 || ^24.22.1 || >=26.12.1`). Older releases are vulnerable to CVE-2026-111497 (Brotli decoder RCE). Node 23 and 25 are not supported. Check your version:
+      Hyperframes requires Node.js 22.23.4+, 24.22.1+, or 26.12.1+ (`^22.23.4 || ^24.22.1 || >=26.12.1`). Older releases are vulnerable to CVE-2026-111497 (Brotli decoder RCE). Node 23 and 25 are not supported. The CLI exits with an error on unsupported versions (only `hyperframes doctor` still runs). Check your version:
 
       ```bash
       node --version

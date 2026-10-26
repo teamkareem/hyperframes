@@ -169,14 +169,14 @@ describe("Node.js version check", () => {
   });
 
   it("fails with a hint naming the CVE and the supported range on unpatched Node", () => {
-    const result = checkNode("v22.17.0");
+    const result = checkNode({ node: "v22.17.0" });
     expect(result.ok).toBe(false);
     expect(result.hint).toContain("CVE-2026-111497");
     expect(result.hint).toContain(SUPPORTED_NODE_RANGE);
   });
 
   it("passes on a patched Node", () => {
-    expect(checkNode("v24.22.1")).toMatchObject({ ok: true });
+    expect(checkNode({ node: "v24.22.1" })).toMatchObject({ ok: true });
   });
 
   it("matches engines.node in every published package that declares it", async () => {
