@@ -37,6 +37,7 @@ export const examples: Example[] = [
 import { cpus, freemem, tmpdir } from "node:os";
 import { resolve, dirname, join, basename } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { resolveProject } from "../utils/project.js";
 import { lintProject, shouldBlockRender } from "../utils/lintProject.js";
 import { formatLintFindings } from "../utils/lintFormat.js";
@@ -615,8 +616,12 @@ export function resolveBrowserGpuForCli(
 
 const DOCKER_IMAGE_PREFIX = "hyperframes-renderer";
 
-function dockerImageTag(version: string): string {
-  return `${DOCKER_IMAGE_PREFIX}:${version}`;
+// The Dockerfile hash is part of the tag because existing tags are reused
+// without rebuilding: a changed Dockerfile (e.g. a patched base image) must
+// produce a new tag or users keep running the old image.
+export function dockerImageTag(version: string, dockerfile: string | Buffer): string {
+  const hash = createHash("sha256").update(dockerfile).digest("hex").slice(0, 12);
+  return `${DOCKER_IMAGE_PREFIX}:${version}-${hash}`;
 }
 
 function resolveDockerfilePath(): string {
@@ -645,7 +650,8 @@ function dockerImageExists(tag: string): boolean {
 }
 
 function ensureDockerImage(version: string, quiet: boolean): string {
-  const tag = dockerImageTag(version);
+  const dockerfile = readFileSync(resolveDockerfilePath());
+  const tag = dockerImageTag(version, dockerfile);
 
   if (dockerImageExists(tag)) {
     if (!quiet) console.log(c.dim(`  Docker image: ${tag} (cached)`));
@@ -654,12 +660,10 @@ function ensureDockerImage(version: string, quiet: boolean): string {
 
   if (!quiet) console.log(c.dim(`  Building Docker image: ${tag}...`));
 
-  const dockerfilePath = resolveDockerfilePath();
-
   // Copy Dockerfile to a temp build context so docker build has a clean context
   const tmpDir = join(tmpdir(), `hyperframes-docker-${Date.now()}`);
   mkdirSync(tmpDir, { recursive: true });
-  writeFileSync(join(tmpDir, "Dockerfile"), readFileSync(dockerfilePath));
+  writeFileSync(join(tmpDir, "Dockerfile"), dockerfile);
 
   // linux/amd64 forced — chrome-headless-shell doesn't ship ARM Linux binaries
   try {

@@ -1,11 +1,16 @@
-import { execSync, spawnSync } from "node:child_process";
+import { execFileSync, execSync, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import { basename } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Browser, detectBrowserPlatform, getInstalledBrowsers, install } from "@puppeteer/browsers";
 
-const CHROME_VERSION = "131.0.6778.85";
+// Keep in sync with the chrome-headless-shell pin in Dockerfile.test so local
+// renders match the regression baselines.
+const CHROME_VERSION = "148.0.7778.167";
+// Chrome < 148 bundles a Brotli decoder vulnerable to CVE-2026-111497
+// (GHSA-9v8h-qqgm-4m35); cached or system binaries older than this are skipped.
+const MIN_CHROME_VERSION = "148.0.0.0";
 const CACHE_DIR = join(homedir(), ".cache", "hyperframes", "chrome");
 // Puppeteer's managed cache — where `@puppeteer/browsers install
 // chrome-headless-shell` (and `puppeteer install`) drop binaries. The engine's
@@ -57,6 +62,11 @@ function whichBinary(name: string): string | undefined {
 function findFromEnv(): BrowserResult | undefined {
   const envPath = process.env["HYPERFRAMES_BROWSER_PATH"];
   if (envPath && existsSync(envPath)) {
+    // An explicit override is honored, but flag it if it's detectably unpatched.
+    const version = detectChromeVersion(envPath);
+    if (version && !isPatchedChromeVersion(version)) {
+      warnStaleBrowserOnce(envPath, version);
+    }
     return { executablePath: envPath, source: "env" };
   }
   return undefined;
@@ -85,13 +95,73 @@ async function findFromCache(): Promise<BrowserResult | undefined> {
   // no puppeteer-cache binary exists.
   if (existsSync(CACHE_DIR)) {
     const installed = await getInstalledBrowsers({ cacheDir: CACHE_DIR });
-    const match = installed.find((b) => b.browser === Browser.CHROMEHEADLESSSHELL);
+    const match = installed
+      .filter((b) => b.browser === Browser.CHROMEHEADLESSSHELL)
+      .filter((b) => {
+        if (isPatchedChromeVersion(b.buildId)) return true;
+        warnStaleBrowserOnce(b.executablePath, b.buildId);
+        return false;
+      })
+      .sort((a, b) => compareVersionDirsDescending(a.buildId, b.buildId))[0];
     if (match) {
       return { executablePath: match.executablePath, source: "cache" };
     }
   }
 
   return undefined;
+}
+
+const MIN_CHROME_SEGMENTS = parseVersionSegments(MIN_CHROME_VERSION) ?? [];
+
+/** True iff `version` parses and is >= MIN_CHROME_VERSION. Unknown versions fail closed. */
+function isPatchedChromeVersion(version: string | undefined): boolean {
+  if (!version) return false;
+  const segments = parseVersionSegments(version);
+  if (!segments) return false;
+  const len = Math.max(segments.length, MIN_CHROME_SEGMENTS.length);
+  for (let i = 0; i < len; i += 1) {
+    const have = segments[i] ?? 0;
+    const need = MIN_CHROME_SEGMENTS[i] ?? 0;
+    if (have !== need) return have > need;
+  }
+  return true;
+}
+
+const _warnedStale = new Set<string>();
+function warnStaleBrowserOnce(executablePath: string, version: string | undefined): void {
+  if (_warnedStale.has(executablePath)) return;
+  _warnedStale.add(executablePath);
+  console.warn(
+    `[hyperframes] Ignoring Chrome at ${executablePath} (version ${version ?? "unknown"}): ` +
+      `versions older than ${MIN_CHROME_VERSION} bundle a Brotli decoder vulnerable to CVE-2026-111497. ` +
+      `Update it, or run \`npx hyperframes browser ensure\` to download Chrome Headless Shell ${CHROME_VERSION}.`,
+  );
+}
+
+/**
+ * Best-effort Chrome version for a binary: a puppeteer-style version directory
+ * in the path wins, otherwise `--version` (skipped on Windows, where
+ * `chrome.exe --version` opens a browser window instead of printing).
+ */
+const _detectedVersions = new Map<string, string | undefined>();
+function detectChromeVersion(executablePath: string): string | undefined {
+  const fromPath = /(?:^|[-/\\])(\d+\.\d+\.\d+\.\d+)(?:[/\\]|$)/.exec(executablePath);
+  if (fromPath) return fromPath[1];
+  if (process.platform === "win32") return undefined;
+  if (_detectedVersions.has(executablePath)) return _detectedVersions.get(executablePath);
+  let version: string | undefined;
+  try {
+    const output = execFileSync(executablePath, ["--version"], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5000,
+    });
+    version = /(\d+\.\d+\.\d+\.\d+)/.exec(output)?.[1];
+  } catch {
+    version = undefined;
+  }
+  _detectedVersions.set(executablePath, version);
+  return version;
 }
 
 /**
@@ -150,6 +220,12 @@ function findFromPuppeteerCache(): BrowserResult | undefined {
     return undefined;
   }
   for (const version of versions) {
+    if (!isPatchedChromeVersion(version)) {
+      if (parseVersionSegments(version)) {
+        warnStaleBrowserOnce(join(PUPPETEER_CACHE_DIR, version), version);
+      }
+      continue;
+    }
     // Same shape as `resolveHeadlessShellPath` in engine/browserManager.ts —
     // keep them aligned. If puppeteer ever changes the on-disk layout the two
     // need to move together.
@@ -211,15 +287,22 @@ export function _resetSystemFallbackWarnForTests(): void {
   _warnedSystemFallback = false;
 }
 
+function acceptSystemBrowser(executablePath: string): boolean {
+  const version = detectChromeVersion(executablePath);
+  if (isPatchedChromeVersion(version)) return true;
+  warnStaleBrowserOnce(executablePath, version);
+  return false;
+}
+
 function findFromSystem(): BrowserResult | undefined {
   for (const p of SYSTEM_CHROME_PATHS) {
-    if (existsSync(p)) {
+    if (existsSync(p) && acceptSystemBrowser(p)) {
       return { executablePath: p, source: "system" };
     }
   }
 
   const fromWhich = whichBinary("google-chrome") ?? whichBinary("chromium");
-  if (fromWhich) {
+  if (fromWhich && acceptSystemBrowser(fromWhich)) {
     return { executablePath: fromWhich, source: "system" };
   }
 
@@ -288,7 +371,8 @@ async function ensureLinuxArmBrowser(options?: EnsureBrowserOptions): Promise<Br
   // Could not auto-install — give clear manual instructions.
   throw new Error(
     `Chrome Headless Shell is not available for Linux ARM64 (DGX Spark, GB10, Jetson).\n\n` +
-      `Install Chromium manually and point hyperframes to it:\n\n` +
+      `Install Chromium ${MIN_CHROME_VERSION.split(".")[0]} or newer manually and point hyperframes to it ` +
+      `(older builds bundle a Brotli decoder vulnerable to CVE-2026-111497):\n\n` +
       `  sudo apt-get install -y chromium-browser\n` +
       `  export HYPERFRAMES_BROWSER_PATH=$(which chromium-browser)\n\n` +
       `Then re-run your command. The HYPERFRAMES_BROWSER_PATH env var persists for the session.`,

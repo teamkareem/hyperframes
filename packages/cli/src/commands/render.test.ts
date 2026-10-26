@@ -261,4 +261,21 @@ describe("renderLocal browser GPU config", () => {
   });
 });
 
+describe("dockerImageTag", () => {
+  it("changes when the Dockerfile changes so stale images are rebuilt", async () => {
+    const { dockerImageTag } = await import("./render.js");
+    const before = dockerImageTag("1.2.3", "FROM node:22-bookworm-slim\n");
+    const after = dockerImageTag("1.2.3", "FROM node:22.23.4-bookworm-slim\n");
+
+    expect(before).toMatch(/^hyperframes-renderer:1\.2\.3-[0-9a-f]{12}$/);
+    expect(after).not.toBe(before);
+    expect(dockerImageTag("1.2.3", "FROM node:22-bookworm-slim\n")).toBe(before);
+  });
+
+  it("keeps dev-mode 'latest' images keyed by Dockerfile content", async () => {
+    const { dockerImageTag } = await import("./render.js");
+    expect(dockerImageTag("latest", "a")).not.toBe(dockerImageTag("latest", "b"));
+  });
+});
+
 // Variables-helper tests live in `../utils/variables.test.ts`.
