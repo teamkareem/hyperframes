@@ -5,7 +5,7 @@ description: HyperFrames CLI dev loop — `npx hyperframes` for scaffolding (ini
 
 # HyperFrames CLI
 
-Everything runs through `npx hyperframes`. Requires Node.js >= 22 and FFmpeg.
+Everything runs through `npx hyperframes`. Requires Node.js `^22.23.4 || ^24.22.1 || >=26.12.1` and FFmpeg.
 
 ## Workflow
 

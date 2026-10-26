@@ -8,6 +8,9 @@ import { findFFmpeg, getFFmpegInstallHint } from "../browser/ffmpeg.js";
 import { VERSION } from "../version.js";
 import { getUpdateMeta, withMeta } from "../utils/updateCheck.js";
 import { getSystemMeta, getShmSizeMb, getFreeDiskMb, bytesToMb } from "../telemetry/system.js";
+import { unsupportedRuntimeMessage, type RuntimeVersions } from "../utils/nodeVersion.js";
+
+export { isSupportedNodeVersion, SUPPORTED_NODE_RANGE } from "../utils/nodeVersion.js";
 
 export const examples: Example[] = [
   ["Check system dependencies", "hyperframes doctor"],
@@ -109,8 +112,13 @@ function checkVersion(): CheckResult {
   return { ok: true, detail: `${VERSION} (latest)` };
 }
 
-function checkNode(): CheckResult {
-  return { ok: true, detail: `${process.version} (${process.platform} ${process.arch})` };
+export function checkNode(
+  runtime: RuntimeVersions = { node: process.version, bun: process.versions.bun },
+): CheckResult {
+  const bun = runtime.bun !== undefined ? ` · Bun ${runtime.bun}` : "";
+  const detail = `${runtime.node}${bun} (${process.platform} ${process.arch})`;
+  const hint = unsupportedRuntimeMessage(runtime);
+  return hint ? { ok: false, detail, hint } : { ok: true, detail };
 }
 
 // ── Hardware & Environment Checks ──────────────────────────────────────────

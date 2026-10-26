@@ -10,7 +10,7 @@ Framework-agnostic: works with GSAP, Lottie, Three.js, CSS animations, or any we
 npm install @hyperframes/engine
 ```
 
-**Requirements:** Node.js >= 22, Chrome/Chromium (auto-downloaded by Puppeteer), FFmpeg
+**Requirements:** Node.js `^22.23.4 || ^24.22.1 || >=26.12.1` (CVE-2026-111497), Chrome/Chromium (auto-downloaded by Puppeteer), FFmpeg
 
 ## What it does
 

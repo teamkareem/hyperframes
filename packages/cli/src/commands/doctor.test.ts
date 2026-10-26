@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { buildDoctorReport, redactHome, type CheckOutcome } from "./doctor.js";
+import {
+  buildDoctorReport,
+  checkNode,
+  isSupportedNodeVersion,
+  redactHome,
+  SUPPORTED_NODE_RANGE,
+  type CheckOutcome,
+} from "./doctor.js";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 const OUTCOMES_ALL_OK: CheckOutcome[] = [
   { name: "Version", ok: true, detail: "0.4.4 (latest)" },
-  { name: "Node.js", ok: true, detail: "v22.0.0 (darwin arm64)" },
+  { name: "Node.js", ok: true, detail: "v22.23.4 (darwin arm64)" },
   { name: "FFmpeg", ok: true, detail: "ffmpeg version 8.1" },
 ];
 
@@ -137,5 +144,49 @@ describe("buildDoctorReport", () => {
       ];
       expect(buildDoctorReport(outcomes).checks[0]?.detail).toBe("/Users/alice/Chrome");
     });
+  });
+});
+
+describe("Node.js version check", () => {
+  it.each([
+    ["v22.23.4", true],
+    ["v22.24.0", true],
+    ["v24.22.1", true],
+    ["v24.23.0", true],
+    ["v26.12.1", true],
+    ["v26.13.0", true],
+    ["v27.0.0", true],
+    ["v22.23.3", false],
+    ["v22.0.0", false],
+    ["v23.11.0", false],
+    ["v24.22.0", false],
+    ["v25.9.0", false],
+    ["v26.12.0", false],
+    ["v20.19.0", false],
+    ["not-a-version", false],
+  ])("isSupportedNodeVersion(%s) === %s", (version, expected) => {
+    expect(isSupportedNodeVersion(version)).toBe(expected);
+  });
+
+  it("fails with a hint naming the CVE and the supported range on unpatched Node", () => {
+    const result = checkNode({ node: "v22.17.0" });
+    expect(result.ok).toBe(false);
+    expect(result.hint).toContain("CVE-2026-111497");
+    expect(result.hint).toContain(SUPPORTED_NODE_RANGE);
+  });
+
+  it("passes on a patched Node", () => {
+    expect(checkNode({ node: "v24.22.1" })).toMatchObject({ ok: true });
+  });
+
+  it("matches engines.node in every published package that declares it", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    for (const pkg of ["cli", "engine", "producer", "aws-lambda"]) {
+      const json = JSON.parse(
+        readFileSync(resolve(__dirname, "../../..", pkg, "package.json"), "utf-8"),
+      ) as { engines?: { node?: string } };
+      expect(json.engines?.node, pkg).toBe(SUPPORTED_NODE_RANGE);
+    }
   });
 });
