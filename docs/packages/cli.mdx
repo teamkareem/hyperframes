@@ -793,6 +793,8 @@ This is suppressed in CI environments, non-TTY shells, and when `HYPERFRAMES_NO_
 
     The `path` subcommand outputs only the path, useful in scripts: `$(npx hyperframes browser path)`.
 
+    Cached and system Chrome builds older than 148 are skipped (they bundle a Brotli decoder affected by CVE-2026-111497), and `ensure` downloads Chrome Headless Shell 148.0.7778.167 instead. A `HYPERFRAMES_BROWSER_PATH` override is still honored, with a warning if it points at an older build.
+
     ### `docs`
 
     View inline documentation in the terminal:

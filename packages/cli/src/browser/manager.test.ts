@@ -37,22 +37,42 @@ const PUPPETEER_BINARY = join(
   "chrome-headless-shell-linux64",
   "chrome-headless-shell",
 );
-const HF_BINARY = join(
-  HF_CACHE,
-  "chrome-headless-shell",
-  "linux-131.0.6778.85",
-  "chrome-headless-shell-linux64",
-  "chrome-headless-shell",
-);
+function hfBinary(buildId: string): string {
+  return join(
+    HF_CACHE,
+    "chrome-headless-shell",
+    `linux-${buildId}`,
+    "chrome-headless-shell-linux64",
+    "chrome-headless-shell",
+  );
+}
+const HF_BINARY = hfBinary("148.0.7778.167");
+const STALE_HF_BINARY = hfBinary("131.0.6778.85");
 const SYSTEM_CHROME = "/usr/bin/google-chrome";
 
 interface FsMockOptions {
   existing: ReadonlySet<string>;
   /** map of dir path -> entries returned by readdirSync */
   dirs?: Record<string, string[]>;
+  /** stdout of `<binary> --version`; `null` makes the probe throw */
+  versionOutput?: string | null;
 }
 
-function installFsMocks({ existing, dirs }: FsMockOptions) {
+function installFsMocks({
+  existing,
+  dirs,
+  versionOutput = "Google Chrome 148.0.7778.167\n",
+}: FsMockOptions) {
+  vi.doMock("node:child_process", () => ({
+    execSync: () => {
+      throw new Error("not found");
+    },
+    execFileSync: () => {
+      if (versionOutput === null) throw new Error("--version failed");
+      return versionOutput;
+    },
+    spawnSync: () => ({ status: 1 }),
+  }));
   vi.doMock("node:fs", () => ({
     existsSync: (p: string) => existing.has(p),
     readdirSync: (p: string) => {
@@ -71,15 +91,19 @@ function installFsMocks({ existing, dirs }: FsMockOptions) {
 
 function installPuppeteerBrowsersMock(
   opts: {
-    installedInHfCache?: Array<{ browser: string; executablePath: string }>;
+    installedInHfCache?: Array<{ browser: string; executablePath: string; buildId: string }>;
   } = {},
 ) {
+  const install = vi.fn(async ({ buildId }: { buildId: string }) => ({
+    executablePath: hfBinary(buildId),
+  }));
   vi.doMock("@puppeteer/browsers", () => ({
     Browser: { CHROMEHEADLESSSHELL: "chrome-headless-shell" },
     detectBrowserPlatform: () => "linux",
     getInstalledBrowsers: vi.fn().mockResolvedValue(opts.installedInHfCache ?? []),
-    install: vi.fn(),
+    install,
   }));
+  return { install };
 }
 
 describe("findBrowser — cache resolution", () => {
@@ -99,6 +123,7 @@ describe("findBrowser — cache resolution", () => {
     vi.restoreAllMocks();
     vi.doUnmock("node:fs");
     vi.doUnmock("node:os");
+    vi.doUnmock("node:child_process");
     vi.doUnmock("@puppeteer/browsers");
   });
 
@@ -108,7 +133,9 @@ describe("findBrowser — cache resolution", () => {
     // last-resort fallback.
     installFsMocks({ existing: new Set([HF_CACHE, HF_BINARY]) });
     installPuppeteerBrowsersMock({
-      installedInHfCache: [{ browser: "chrome-headless-shell", executablePath: HF_BINARY }],
+      installedInHfCache: [
+        { browser: "chrome-headless-shell", executablePath: HF_BINARY, buildId: "148.0.7778.167" },
+      ],
     });
 
     const { findBrowser } = await import("./manager.js");
@@ -133,7 +160,7 @@ describe("findBrowser — cache resolution", () => {
   });
 
   it("prefers the puppeteer cache over the hyperframes cache when BOTH are populated", async () => {
-    // The HF cache is pinned to `CHROME_VERSION` (131-era) which lags upstream
+    // The HF cache is pinned to `CHROME_VERSION`, which can lag upstream
     // by many releases. The engine's `resolveHeadlessShellPath` scans the
     // puppeteer cache and selects newest-version-first; if the CLI handed
     // engine the older HF-cache binary while a newer puppeteer-cache binary
@@ -144,7 +171,9 @@ describe("findBrowser — cache resolution", () => {
       dirs: { [PUPPETEER_CACHE]: ["linux-148.0.7778.97"] },
     });
     installPuppeteerBrowsersMock({
-      installedInHfCache: [{ browser: "chrome-headless-shell", executablePath: HF_BINARY }],
+      installedInHfCache: [
+        { browser: "chrome-headless-shell", executablePath: HF_BINARY, buildId: "148.0.7778.167" },
+      ],
     });
 
     const { findBrowser } = await import("./manager.js");
@@ -269,5 +298,129 @@ describe("findBrowser — cache resolution", () => {
     await findBrowser();
 
     expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("findBrowser / ensureBrowser — minimum patched Chrome version", () => {
+  const origPlatform = process.platform;
+  const STALE_PUPPETEER_BINARY = join(
+    PUPPETEER_CACHE,
+    "linux-131.0.6778.85",
+    "chrome-headless-shell-linux64",
+    "chrome-headless-shell",
+  );
+  const staleHfEntry = {
+    browser: "chrome-headless-shell",
+    executablePath: STALE_HF_BINARY,
+    buildId: "131.0.6778.85",
+  };
+
+  beforeEach(() => {
+    vi.resetModules();
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    delete process.env["HYPERFRAMES_BROWSER_PATH"];
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, "platform", { value: origPlatform, configurable: true });
+    vi.restoreAllMocks();
+    vi.doUnmock("node:fs");
+    vi.doUnmock("node:os");
+    vi.doUnmock("node:child_process");
+    vi.doUnmock("@puppeteer/browsers");
+    delete process.env["HYPERFRAMES_BROWSER_PATH"];
+  });
+
+  it("downloads the patched CHROME_VERSION instead of reusing a stale hyperframes cache", async () => {
+    installFsMocks({ existing: new Set([HF_CACHE, STALE_HF_BINARY]) });
+    const { install } = installPuppeteerBrowsersMock({ installedInHfCache: [staleHfEntry] });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { ensureBrowser, CHROME_VERSION } = await import("./manager.js");
+    const result = await ensureBrowser();
+
+    expect(CHROME_VERSION).toBe("148.0.7778.167");
+    expect(install).toHaveBeenCalledWith(expect.objectContaining({ buildId: CHROME_VERSION }));
+    expect(result).toEqual({ executablePath: hfBinary(CHROME_VERSION), source: "download" });
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("CVE-2026-111497");
+  });
+
+  it("prefers a patched hyperframes-cache build over a stale one cached alongside it", async () => {
+    installFsMocks({ existing: new Set([HF_CACHE, STALE_HF_BINARY, HF_BINARY]) });
+    installPuppeteerBrowsersMock({
+      installedInHfCache: [
+        staleHfEntry,
+        { browser: "chrome-headless-shell", executablePath: HF_BINARY, buildId: "148.0.7778.167" },
+      ],
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { findBrowser } = await import("./manager.js");
+
+    expect(await findBrowser()).toEqual({ executablePath: HF_BINARY, source: "cache" });
+  });
+
+  it("skips stale puppeteer-cache builds", async () => {
+    installFsMocks({
+      existing: new Set([PUPPETEER_CACHE, STALE_PUPPETEER_BINARY]),
+      dirs: { [PUPPETEER_CACHE]: ["linux-131.0.6778.85"] },
+    });
+    installPuppeteerBrowsersMock();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { findBrowser } = await import("./manager.js");
+
+    expect(await findBrowser()).toBeUndefined();
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("131.0.6778.85");
+  });
+
+  it("rejects a system Chrome older than the minimum version", async () => {
+    installFsMocks({
+      existing: new Set([SYSTEM_CHROME]),
+      versionOutput: "Google Chrome 131.0.6778.85\n",
+    });
+    installPuppeteerBrowsersMock();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { findBrowser } = await import("./manager.js");
+
+    expect(await findBrowser()).toBeUndefined();
+    expect(warnSpy.mock.calls[0]?.[0]).toContain(SYSTEM_CHROME);
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("CVE-2026-111497");
+  });
+
+  it("rejects a system Chrome whose version cannot be determined", async () => {
+    installFsMocks({ existing: new Set([SYSTEM_CHROME]), versionOutput: null });
+    installPuppeteerBrowsersMock();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { findBrowser } = await import("./manager.js");
+
+    expect(await findBrowser()).toBeUndefined();
+  });
+
+  it("accepts a patched Debian Chromium version string", async () => {
+    installFsMocks({
+      existing: new Set([SYSTEM_CHROME]),
+      versionOutput: "Chromium 150.0.7871.100 built on Debian GNU/Linux 12 (bookworm)\n",
+    });
+    installPuppeteerBrowsersMock();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { findBrowser } = await import("./manager.js");
+
+    expect(await findBrowser()).toEqual({ executablePath: SYSTEM_CHROME, source: "system" });
+  });
+
+  it("honors an explicit HYPERFRAMES_BROWSER_PATH override but warns when it is stale", async () => {
+    installFsMocks({ existing: new Set([STALE_PUPPETEER_BINARY]) });
+    installPuppeteerBrowsersMock();
+    process.env["HYPERFRAMES_BROWSER_PATH"] = STALE_PUPPETEER_BINARY;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { findBrowser } = await import("./manager.js");
+
+    expect(await findBrowser()).toEqual({ executablePath: STALE_PUPPETEER_BINARY, source: "env" });
+    expect(warnSpy.mock.calls[0]?.[0]).toContain("CVE-2026-111497");
   });
 });
